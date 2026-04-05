@@ -1,3 +1,3 @@
-from models.basic import *
-from models.resnet import *
-from models.resnet_bn import *
+from .resnet import resnet18_cifar
+
+__all__ = ["resnet18_cifar"]
