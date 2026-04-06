@@ -31,6 +31,7 @@
 
 ```bash
 python main_FedNSAM.py \
+  --algorithm fednsam \
   --dataset cifar100 \
   --rounds 300 \
   --num-clients 100 \
@@ -43,6 +44,43 @@ python main_FedNSAM.py \
   --gamma 0.85 \
   --alpha 0.1
 ```
+
+## 对比 FedAvg / FedSAM / FedNSAM
+
+单独跑某一个算法：
+
+```bash
+python main_FedNSAM.py --algorithm fedavg  --dataset cifar100 --rounds 300 --num-clients 100 --client-fraction 0.1 --local-epochs 5 --local-steps 50 --batch-size 50 --lr 0.1 --alpha 0.1
+python main_FedNSAM.py --algorithm fedsam  --dataset cifar100 --rounds 300 --num-clients 100 --client-fraction 0.1 --local-epochs 5 --local-steps 50 --batch-size 50 --lr 0.1 --rho 0.05 --alpha 0.1
+python main_FedNSAM.py --algorithm fednsam --dataset cifar100 --rounds 300 --num-clients 100 --client-fraction 0.1 --local-epochs 5 --local-steps 50 --batch-size 50 --lr 0.1 --rho 0.05 --gamma 0.85 --alpha 0.1
+```
+
+一次性公平对比三个算法：
+
+```bash
+python main_FedNSAM.py \
+  --compare fedavg fedsam fednsam \
+  --dataset cifar100 \
+  --rounds 300 \
+  --num-clients 100 \
+  --client-fraction 0.1 \
+  --local-epochs 5 \
+  --local-steps 50 \
+  --batch-size 50 \
+  --lr 0.1 \
+  --rho 0.05 \
+  --gamma 0.85 \
+  --alpha 0.1 \
+  --save-json results/cifar100_compare.json
+```
+
+对比模式下会复用：
+
+- 同一份客户端划分
+- 同一份初始模型
+- 同一组每轮客户端采样顺序
+
+这样 `FedAvg`、`FedSAM`、`FedNSAM` 的差异主要来自算法本身，而不是随机性。
 
 ## FedNSAM 主流程
 
