@@ -151,57 +151,44 @@ else:
 
 import dataset as local_datasets
 
-if data_name == 'imagenet':
-    train_dataset = local_datasets.TinyImageNetDataset(
-        root=os.path.join(args.datapath, 'tiny-imagenet-200'),
-        split='train',
-        transform=transform_train
-    )
+def build_train_dataset(data_name):
+    if data_name == 'imagenet':
+        return local_datasets.TinyImageNetDataset(
+            root=os.path.join(args.datapath, 'tiny-imagenet-200'),
+            split='train',
+            transform=transform_train
+        )
+    if data_name == 'CIFAR10':
+        return datasets.CIFAR10(
+            "./data",
+            train=True,
+            download=True,
+            transform=transform_train)
+    if data_name == 'CIFAR100':
+        return datasets.cifar.CIFAR100(
+            "./data",
+            train=True,
+            download=True,
+            transform=transform_train
+        )
+    raise ValueError(f"Unsupported dataset for training loader: {data_name}")
 
-if data_name == 'CIFAR10':
 
-    train_dataset = datasets.CIFAR10(
-        "./data",
-        train=True,
-        download=True,
-        transform=transform_train)
+train_dataset = build_train_dataset(data_name)
 
 
-elif data_name == 'CIFAR100':
-    train_dataset = datasets.cifar.CIFAR100(
-        "./data",
-        train=True,
-        download=True,
-        transform=transform_train
-    )
-
-if args.alpha_value==1:
-    generator = torch.Generator().manual_seed(42)
-    total_size = len(train_dataset)
-    print(total_size)
-    subset_size = total_size // args.num_workers
-    remainder = total_size % args.num_workers  # 计算剩余的样本数
-    # 创建分割大小列表
-    split_sizes = [subset_size] * (args.num_workers-1)+ [subset_size + remainder]
-    subsets = random_split(train_dataset, split_sizes, generator=generator)
-
-    def get_data_loader(pid, data_idx, batch_size, data_name):
-        """Safely downloads data. Returns training/validation set dataloader. 使用到了外部的数据"""
-        sample_chosed = data_idx[pid]
-        train_sampler = SubsetRandomSampler(sample_chosed)
-        train_loader = DataLoader(subsets[pid], batch_size=args.batch_size, shuffle=True)
-        return train_loader
-
-if args.alpha_value!=1:
-    def get_data_loader(pid, data_idx, batch_size, data_name):
-        """Safely downloads data. Returns training/validation set dataloader. 使用到了外部的数据"""
-        sample_chosed = data_idx[pid]
-        train_sampler = SubsetRandomSampler(sample_chosed)
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            sampler=train_sampler, num_workers=0, generator=torch.Generator().manual_seed(seed))
-        return train_loader
+def get_data_loader(pid, data_idx, batch_size, data_name):
+    """Build the dataset inside the loader to avoid Ray capturing a huge global object."""
+    sample_chosed = data_idx[pid]
+    train_sampler = SubsetRandomSampler(sample_chosed)
+    local_train_dataset = build_train_dataset(data_name)
+    train_loader = torch.utils.data.DataLoader(
+        local_train_dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        num_workers=0,
+        generator=torch.Generator().manual_seed(seed))
+    return train_loader
 
 
 def get_data_loader_test(data_name):
