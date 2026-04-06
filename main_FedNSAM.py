@@ -1663,10 +1663,13 @@ if __name__ == "__main__":
         model = ConvNet100().to('cpu')
 
     epoch_s = 0
+    effective_p = max(1, int(args.p))
+    selected_clients = max(1, int(num_workers * selection))
+    clients_per_wave = max(1, int(selected_clients / effective_p))
     # c_dict = None,None
     workers = [DataWorker.remote(i, data_idx, num_workers,
                                  lr, batch_size=batch_size, alg=alg, data_name=data_name, selection=selection,
-                                 T_part=T_part) for i in range(int(num_workers * selection / args.p))]
+                                 T_part=T_part) for i in range(clients_per_wave)]
     logger.info('extra_name:{},alg:{},E:{},data_name:{}, epoch:{}, lr:{},alpha_value:{},alpha:{},CNN:{},rho:{}'
                 .format(extra_name, alg, E, data_name, epoch, lr, alpha_value, alpha, args.CNN, args.rho))
     #logger.info('data_idx{}'.format(data_idx))
@@ -1776,7 +1779,7 @@ if __name__ == "__main__":
     for epochidx in range(epoch_s, epoch):
         index = np.arange(num_workers)  # 100
         np.random.shuffle(index)
-        index = index[:int(num_workers * selection)]  # 10id
+        index = index[:selected_clients]  # selected client ids
         start_time1 = time.time()
         eta_max=args.lr
         eta_min =0
@@ -1786,9 +1789,9 @@ if __name__ == "__main__":
 
         if alg in { 'FedCM','FedMoSAM','IGFL'}:
             weights_and_ci = []
-            n = int(num_workers * selection)
-            for i in range(0, n, int(n / args.p)):
-                index_sel = index[i:i + int(n / args.p)]
+            n = selected_clients
+            for i in range(0, n, clients_per_wave):
+                index_sel = index[i:i + clients_per_wave]
                 weights_and_ci = weights_and_ci + [worker.update_func.remote(alg, current_weights, E, idx, lr, ps_c) for
                                                    worker, idx in
                                                    zip(workers, index_sel)]
@@ -1802,9 +1805,9 @@ if __name__ == "__main__":
 
         if alg in {'FedLADA','FedAdamW','FedMuon'}:
             weights_and_ci = []
-            n = int(num_workers * selection)
-            for i in range(0, n, int(n / args.p)):
-                index_sel = index[i:i + int(n / args.p)]
+            n = selected_clients
+            for i in range(0, n, clients_per_wave):
+                index_sel = index[i:i + clients_per_wave]
                 weights_and_ci = weights_and_ci + [worker.update_func.remote(alg, current_weights, E, idx, lr, ps_c=m, v=v,step=step) for
                                                    worker, idx in
                                                    zip(workers, index_sel)]
@@ -1819,9 +1822,9 @@ if __name__ == "__main__":
 
         if alg in {'SCAFFOLD','MoFedSWA'}:
             weights_and_ci = []
-            n = int(num_workers * selection)
-            for i in range(0, n, int(n / args.p)):
-                index_sel = index[i:i + int(n / args.p)]
+            n = selected_clients
+            for i in range(0, n, clients_per_wave):
+                index_sel = index[i:i + clients_per_wave]
                 weights_and_ci = weights_and_ci + [
                     worker.update_func.remote(alg, current_weights, E, idx, lr, ps_c=ps_c)
                     for worker, idx in zip(workers, index_sel)]
@@ -1836,9 +1839,9 @@ if __name__ == "__main__":
 
         elif alg in {'FedAvg', 'FedSWA','Fedprox', 'FedAvg_adamw','FedSAM','Local_Soap','Local_Muon','Local_Shampoo','Local_AdEMAMix'}:
             weights = []
-            n = int(num_workers * selection)
-            for i in range(0, n, int(n / args.p)):
-                index_sel = index[i:i + int(n / args.p)]
+            n = selected_clients
+            for i in range(0, n, clients_per_wave):
+                index_sel = index[i:i + clients_per_wave]
                 weights_ref = ray.put(current_weights)
                 # 然后传进去：
                 weights = [worker.update_func.remote(alg, weights_ref, E, idx, lr) for worker, idx in
@@ -1850,9 +1853,9 @@ if __name__ == "__main__":
 
         elif alg in {'FedAdam'}:
             weights = []
-            n = int(num_workers * selection)
-            for i in range(0, n, int(n / args.p)):
-                index_sel = index[i:i + int(n / args.p)]
+            n = selected_clients
+            for i in range(0, n, clients_per_wave):
+                index_sel = index[i:i + clients_per_wave]
                 weights = [worker.update_func.remote(alg, current_weights, E, idx, lr) for worker, idx in
                            zip(workers, index_sel)]
             weights=ray.get(weights)
@@ -1864,9 +1867,9 @@ if __name__ == "__main__":
 
         if alg in { 'FedACG','FedNSAM','FedNesterov'}:
             weights = []
-            n = int(num_workers * selection)
-            for i in range(0, n, int(n / args.p)):
-                index_sel = index[i:i + int(n / args.p)]
+            n = selected_clients
+            for i in range(0, n, clients_per_wave):
+                index_sel = index[i:i + clients_per_wave]
                 weights = weights + [worker.update_func.remote(alg, current_weights, E, idx, lr, momen_m) for
                                      worker, idx in
                                      zip(workers, index_sel)]
@@ -1878,9 +1881,9 @@ if __name__ == "__main__":
 
         elif alg in {'FedMoment'}:
             weights = []
-            n = int(num_workers * selection)
-            for i in range(0, n, int(n / args.p)):
-                index_sel = index[i:i + int(n / args.p)]
+            n = selected_clients
+            for i in range(0, n, clients_per_wave):
+                index_sel = index[i:i + clients_per_wave]
                 weights = [worker.update_func.remote(alg, current_weights, E, idx, lr) for worker, idx in
                            zip(workers, index_sel)]
             weights=ray.get(weights)
