@@ -1,10 +1,16 @@
 import argparse
 
-from fednsam import FedNSAMConfig, run_fednsam
+from fednsam import FedNSAMConfig, compare_histories, normalize_algorithm_name, run_fednsam
 
 
-def parse_args() -> FedNSAMConfig:
+def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
     parser = argparse.ArgumentParser(description="Minimal FedNSAM training entrypoint.")
+    parser.add_argument("--algorithm", default="fednsam", help="fedavg, fedsam, or fednsam")
+    parser.add_argument(
+        "--compare",
+        nargs="+",
+        help="Compare multiple algorithms fairly, e.g. --compare fedavg fedsam fednsam",
+    )
     parser.add_argument("--dataset", choices=["cifar10", "cifar100"], default="cifar100")
     parser.add_argument("--data-dir", default="./data")
     parser.add_argument("--rounds", type=int, default=300)
@@ -24,8 +30,10 @@ def parse_args() -> FedNSAMConfig:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--save-json", default=None)
     args = parser.parse_args()
-    return FedNSAMConfig(
+    config = FedNSAMConfig(
+        algorithm=normalize_algorithm_name(args.algorithm),
         dataset=args.dataset,
         data_dir=args.data_dir,
         rounds=args.rounds,
@@ -45,8 +53,15 @@ def parse_args() -> FedNSAMConfig:
         num_workers=args.num_workers,
         seed=args.seed,
         device=args.device,
+        save_json=args.save_json,
     )
+    compare = None if args.compare is None else [normalize_algorithm_name(name) for name in args.compare]
+    return config, compare
 
 
 if __name__ == "__main__":
-    run_fednsam(parse_args())
+    config, compare = parse_args()
+    if compare:
+        compare_histories(config, compare)
+    else:
+        run_fednsam(config)
