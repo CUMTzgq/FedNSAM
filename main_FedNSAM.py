@@ -1665,7 +1665,22 @@ if __name__ == "__main__":
     epoch_s = 0
     effective_p = max(1, int(args.p))
     selected_clients = max(1, int(num_workers * selection))
-    clients_per_wave = max(1, int(selected_clients / effective_p))
+    requested_clients_per_wave = max(1, int(selected_clients / effective_p))
+    if num_gpus_per > num_gpus:
+        raise ValueError(
+            f"--num_gpus_per={num_gpus_per} exceeds visible GPU count {num_gpus}. "
+            f"Reduce --num_gpus_per or expose more GPUs via --gpu."
+        )
+    if num_gpus_per > 0:
+        max_parallel_workers = max(1, int(num_gpus / num_gpus_per))
+    else:
+        max_parallel_workers = requested_clients_per_wave
+    clients_per_wave = min(requested_clients_per_wave, max_parallel_workers)
+    if clients_per_wave < requested_clients_per_wave:
+        print(
+            f"Reducing concurrent clients from {requested_clients_per_wave} to {clients_per_wave} "
+            f"to fit {num_gpus} visible GPU(s) with --num_gpus_per={num_gpus_per}."
+        )
     # c_dict = None,None
     workers = [DataWorker.remote(i, data_idx, num_workers,
                                  lr, batch_size=batch_size, alg=alg, data_name=data_name, selection=selection,
