@@ -1,3 +1,4 @@
 /data
 *pycache*
 .venv
+colab.ipynb
