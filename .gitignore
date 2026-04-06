@@ -1,0 +1,5 @@
+# Datasets
+data/
+
+# Cache
+__pycache__/
