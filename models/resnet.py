@@ -2,6 +2,10 @@ import torch
 from torch import nn
 
 
+def make_group_norm(channels: int) -> nn.GroupNorm:
+    return nn.GroupNorm(num_groups=32, num_channels=channels)
+
+
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -9,16 +13,16 @@ class BasicBlock(nn.Module):
         super().__init__()
         self.residual = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            make_group_norm(out_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            make_group_norm(out_channels),
         )
         self.shortcut = nn.Identity()
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels),
+                make_group_norm(out_channels),
             )
         self.activation = nn.ReLU(inplace=True)
 
@@ -31,7 +35,7 @@ class CIFARResNet(nn.Module):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            make_group_norm(64),
             nn.ReLU(inplace=True),
         )
         self.in_channels = 64
