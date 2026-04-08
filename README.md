@@ -82,6 +82,53 @@ python main_FedNSAM.py \
 
 这样 `FedAvg`、`FedSAM`、`FedNSAM` 的差异主要来自算法本身，而不是随机性。
 
+## Client-level DP
+
+直接指定 DP 裁剪阈值和噪声倍率：
+
+```bash
+python main_FedNSAM.py \
+  --compare fedavg fedsam fednsam \
+  --dataset cifar100 \
+  --rounds 300 \
+  --num-clients 100 \
+  --client-fraction 0.1 \
+  --local-epochs 5 \
+  --local-steps 50 \
+  --batch-size 50 \
+  --lr 0.1 \
+  --rho 0.05 \
+  --gamma 0.85 \
+  --alpha 0.1 \
+  --dp \
+  --dp-clip 0.2 \
+  --sigma 0.95 \
+  --delta 2e-5
+```
+
+或者给定目标隐私预算，由程序在训练前反推 `sigma`：
+
+```bash
+python main_FedNSAM.py \
+  --algorithm fednsam \
+  --dataset cifar100 \
+  --rounds 300 \
+  --num-clients 100 \
+  --client-fraction 0.1 \
+  --local-epochs 5 \
+  --local-steps 50 \
+  --batch-size 50 \
+  --lr 0.1 \
+  --rho 0.05 \
+  --gamma 0.85 \
+  --alpha 0.1 \
+  --dp \
+  --dp-clip 0.2 \
+  --eps 8.0
+```
+
+启用 DP 后，会在每个评估点记录对应的 `epsilon`，并一起写入保存的 JSON 结果。
+
 ## FedNSAM 主流程
 
 1. 服务器维护全局模型 `w_t` 和全局动量 `m_t`

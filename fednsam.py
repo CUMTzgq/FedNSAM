@@ -14,7 +14,10 @@ from torchvision import datasets, transforms
 
 from dirichlet_data import build_dirichlet_partitions
 from models import resnet18_cifar
+from privacy import add_gaussian_noise, clip_model_update, compute_epsilon, solve_noise_multiplier
 from sam import SAM
+
+ExperimentHistory = dict[str, object]
 
 
 @dataclass
@@ -35,6 +38,11 @@ class FedNSAMConfig:
     gamma: float = 0.85
     alpha: float = 0.1
     grad_clip: float | None = 10.0
+    dp: bool = False
+    dp_clip_norm: float | None = None
+    dp_noise_multiplier: float | None = None
+    dp_target_epsilon: float | None = None
+    dp_delta: float | None = None
     eval_every: int = 10
     num_workers: int = 0
     seed: int = 42
@@ -100,6 +108,10 @@ def build_equal_client_sizes(num_examples: int, num_clients: int) -> list[int]:
     return [base + (1 if client_id < remainder else 0) for client_id in range(num_clients)]
 
 
+def selected_clients_per_round(config: FedNSAMConfig) -> int:
+    return max(1, int(config.num_clients * config.client_fraction))
+
+
 def cosine_lr(round_idx: int, config: FedNSAMConfig) -> float:
     if config.rounds <= 1:
         return config.lr
@@ -136,7 +148,7 @@ def build_cifar_datasets(config: FedNSAMConfig):
 
 
 def build_client_selection_schedule(config: FedNSAMConfig) -> list[list[int]]:
-    clients_per_round = max(1, int(config.num_clients * config.client_fraction))
+    clients_per_round = selected_clients_per_round(config)
     rng = np.random.default_rng(config.seed + 7)
     return [
         rng.choice(config.num_clients, clients_per_round, replace=False).tolist()
@@ -369,6 +381,58 @@ def get_local_update_fn(algorithm: str):
     raise ValueError(f"Unsupported algorithm: {algorithm}")
 
 
+def resolve_privacy_settings(config: FedNSAMConfig, train_examples: int) -> dict[str, float | str | bool | None]:
+    if not config.dp:
+        return {
+            "enabled": False,
+            "clip_norm": None,
+            "noise_multiplier": None,
+            "target_epsilon": None,
+            "delta": None,
+            "sample_rate": None,
+            "source": None,
+            "final_epsilon": None,
+            "optimal_order": None,
+        }
+
+    if config.dp_clip_norm is None:
+        raise ValueError("DP is enabled but no clip norm was provided.")
+
+    delta = config.dp_delta if config.dp_delta is not None else 1.0 / train_examples
+    sample_rate = selected_clients_per_round(config) / config.num_clients
+    if config.dp_noise_multiplier is not None:
+        noise_multiplier = config.dp_noise_multiplier
+        source = "sigma"
+    elif config.dp_target_epsilon is not None:
+        noise_multiplier = solve_noise_multiplier(
+            target_epsilon=config.dp_target_epsilon,
+            sample_rate=sample_rate,
+            steps=config.rounds,
+            delta=delta,
+        )
+        source = "eps"
+    else:
+        raise ValueError("DP is enabled but neither sigma nor eps was provided.")
+
+    final_epsilon, optimal_order = compute_epsilon(
+        noise_multiplier=noise_multiplier,
+        sample_rate=sample_rate,
+        steps=config.rounds,
+        delta=delta,
+    )
+    return {
+        "enabled": True,
+        "clip_norm": config.dp_clip_norm,
+        "noise_multiplier": noise_multiplier,
+        "target_epsilon": config.dp_target_epsilon,
+        "delta": delta,
+        "sample_rate": sample_rate,
+        "source": source,
+        "final_epsilon": final_epsilon,
+        "optimal_order": optimal_order,
+    }
+
+
 def run_single_experiment(
     config: FedNSAMConfig,
     algorithm: str,
@@ -378,7 +442,8 @@ def run_single_experiment(
     selection_schedule: list[list[int]],
     test_dataset,
     num_classes: int,
-) -> dict[str, list[float] | str]:
+    privacy_settings: dict[str, float | str | bool | None],
+) -> ExperimentHistory:
     algorithm = normalize_algorithm_name(algorithm)
     set_random_seed(config.seed)
     device = torch.device(config.device if config.device == "cpu" or torch.cuda.is_available() else "cpu")
@@ -395,7 +460,20 @@ def run_single_experiment(
     global_state = clone_state_dict(initial_state)
     global_model.load_state_dict(to_device(global_state, device))
     global_momentum = zero_update_like(global_state)
-    history = {"algorithm": algorithm, "round": [], "accuracy": [], "loss": []}
+    history: ExperimentHistory = {
+        "algorithm": algorithm,
+        "round": [],
+        "accuracy": [],
+        "loss": [],
+        "epsilon": [],
+        "dp_enabled": privacy_settings["enabled"],
+        "dp_clip_norm": privacy_settings["clip_norm"],
+        "dp_noise_multiplier": privacy_settings["noise_multiplier"],
+        "dp_target_epsilon": privacy_settings["target_epsilon"],
+        "dp_delta": privacy_settings["delta"],
+        "dp_sample_rate": privacy_settings["sample_rate"],
+        "dp_source": privacy_settings["source"],
+    }
 
     print(
         f"{algorithm.upper()} | dataset={config.dataset} | clients={config.num_clients} | "
@@ -429,10 +507,17 @@ def run_single_experiment(
                     config=config,
                     device=device,
                 )
+            if privacy_settings["enabled"]:
+                update, _, _ = clip_model_update(update, float(privacy_settings["clip_norm"]))
             local_updates.append(update)
             local_losses.append(local_loss)
 
         avg_delta = average_updates(local_updates)
+        if privacy_settings["enabled"]:
+            noise_std = (
+                float(privacy_settings["noise_multiplier"]) * float(privacy_settings["clip_norm"]) / len(selected_clients)
+            )
+            avg_delta = add_gaussian_noise(avg_delta, noise_std)
         if algorithm == "fednsam":
             global_momentum = update_global_momentum(global_momentum, avg_delta, config.gamma)
             global_state = apply_update(global_state, global_momentum)
@@ -446,23 +531,37 @@ def run_single_experiment(
             history["round"].append(round_idx + 1)
             history["accuracy"].append(accuracy)
             history["loss"].append(test_loss)
+            if privacy_settings["enabled"]:
+                epsilon, _ = compute_epsilon(
+                    noise_multiplier=float(privacy_settings["noise_multiplier"]),
+                    sample_rate=float(privacy_settings["sample_rate"]),
+                    steps=round_idx + 1,
+                    delta=float(privacy_settings["delta"]),
+                )
+                history["epsilon"].append(epsilon)
             print(
                 f"{algorithm.upper()} round={round_idx + 1:03d} | lr={lr:.5f} | "
                 f"local_loss={np.mean(local_losses):.4f} | test_loss={test_loss:.4f} | "
-                f"test_acc={accuracy * 100:.2f}% | clients={format_client_selection(selected_clients)}"
+                f"test_acc={accuracy * 100:.2f}%"
+                + (
+                    f" | eps={history['epsilon'][-1]:.4f}"
+                    if privacy_settings["enabled"] and history["epsilon"]
+                    else ""
+                )
+                + f" | clients={format_client_selection(selected_clients)}"
             )
 
     return history
 
 
-def save_histories(histories: dict[str, dict[str, list[float] | str]], output_path: str) -> None:
+def save_histories(histories: dict[str, ExperimentHistory], output_path: str) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fp:
         json.dump(histories, fp, indent=2)
 
 
-def compare_histories(config: FedNSAMConfig, algorithms: list[str]) -> dict[str, dict[str, list[float] | str]]:
+def compare_histories(config: FedNSAMConfig, algorithms: list[str]) -> dict[str, ExperimentHistory]:
     set_random_seed(config.seed)
     train_dataset, test_dataset, num_classes = build_cifar_datasets(config)
     client_sizes = build_equal_client_sizes(len(train_dataset), config.num_clients)
@@ -474,11 +573,27 @@ def compare_histories(config: FedNSAMConfig, algorithms: list[str]) -> dict[str,
         client_sizes=client_sizes,
     )
     selection_schedule = build_client_selection_schedule(config)
+    privacy_settings = resolve_privacy_settings(config, len(train_dataset))
 
     set_random_seed(config.seed)
     initial_state = clone_state_dict(build_model(num_classes).state_dict())
 
-    histories: dict[str, dict[str, list[float] | str]] = {}
+    if privacy_settings["enabled"]:
+        print(
+            "DP enabled | "
+            f"clip={float(privacy_settings['clip_norm']):.4f} | "
+            f"sigma={float(privacy_settings['noise_multiplier']):.6f} | "
+            f"delta={float(privacy_settings['delta']):.6g} | "
+            f"q={float(privacy_settings['sample_rate']):.4f}"
+            + (
+                f" | target_eps={float(privacy_settings['target_epsilon']):.4f}"
+                if privacy_settings["target_epsilon"] is not None
+                else ""
+            )
+            + f" | final_eps={float(privacy_settings['final_epsilon']):.4f}"
+        )
+
+    histories: dict[str, ExperimentHistory] = {}
     for algorithm in algorithms:
         histories[algorithm] = run_single_experiment(
             config=config,
@@ -489,14 +604,22 @@ def compare_histories(config: FedNSAMConfig, algorithms: list[str]) -> dict[str,
             selection_schedule=selection_schedule,
             test_dataset=test_dataset,
             num_classes=num_classes,
+            privacy_settings=privacy_settings,
         )
 
     print("\nSummary")
     for algorithm in algorithms:
         history = histories[algorithm]
-        best_acc = max(history["accuracy"]) if history["accuracy"] else float("nan")
-        final_acc = history["accuracy"][-1] if history["accuracy"] else float("nan")
-        print(f"{algorithm.upper():8s} | best_acc={best_acc * 100:.2f}% | final_acc={final_acc * 100:.2f}%")
+        accuracy_history = history["accuracy"]
+        assert isinstance(accuracy_history, list)
+        best_acc = max(accuracy_history) if accuracy_history else float("nan")
+        final_acc = accuracy_history[-1] if accuracy_history else float("nan")
+        summary = f"{algorithm.upper():8s} | best_acc={best_acc * 100:.2f}% | final_acc={final_acc * 100:.2f}%"
+        epsilon_history = history["epsilon"]
+        assert isinstance(epsilon_history, list)
+        if epsilon_history:
+            summary += f" | final_eps={epsilon_history[-1]:.4f}"
+        print(summary)
 
     if config.save_json:
         save_histories(histories, config.save_json)
@@ -505,6 +628,6 @@ def compare_histories(config: FedNSAMConfig, algorithms: list[str]) -> dict[str,
     return histories
 
 
-def run_fednsam(config: FedNSAMConfig) -> dict[str, list[float] | str]:
+def run_fednsam(config: FedNSAMConfig) -> ExperimentHistory:
     history = compare_histories(config, [normalize_algorithm_name(config.algorithm)])
     return history[normalize_algorithm_name(config.algorithm)]
