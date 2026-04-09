@@ -129,6 +129,32 @@ python main_FedNSAM.py \
 
 启用 DP 后，会在每个评估点记录对应的 `epsilon`，并一起写入保存的 JSON 结果。
 
+## 单卡提速
+
+如果你只有一张 GPU，可以先打开这两个开关：
+
+```bash
+python main_FedNSAM.py \
+  --compare fedavg fedsam fednsam \
+  --dataset cifar100 \
+  --rounds 100 \
+  --num-clients 100 \
+  --client-fraction 0.1 \
+  --local-epochs 1 \
+  --local-steps 5 \
+  --batch-size 128 \
+  --lr 0.1 \
+  --rho 0.05 \
+  --gamma 0.85 \
+  --alpha 0.6 \
+  --device cuda \
+  --fast-cuda \
+  --amp auto
+```
+
+- `--fast-cuda`: 打开 `cudnn.benchmark`、TF32，并让卷积走 `channels_last`
+- `--amp auto`: CUDA 上优先用 `bf16`，否则自动回退到 `fp16`
+
 ## FedNSAM 主流程
 
 1. 服务器维护全局模型 `w_t` 和全局动量 `m_t`

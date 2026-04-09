@@ -40,6 +40,16 @@ class SAM(torch.optim.Optimizer):
         if zero_grad: self.zero_grad()
 
     @torch.no_grad()
+    def restore_step(self, zero_grad=False):
+        for group in self.param_groups:
+            for p in group["params"]:
+                if "old_p" not in self.state[p]:
+                    continue
+                p.data = self.state[p]["old_p"]
+
+        if zero_grad: self.zero_grad()
+
+    @torch.no_grad()
     def step(self, closure=None):
         assert closure is not None, "Sharpness Aware Minimization requires closure, but it was not provided"
         closure = torch.enable_grad()(closure)  # the closure should do a full forward-backward pass

@@ -60,6 +60,17 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--fast-cuda",
+        action="store_true",
+        help="Enable non-deterministic CUDA speed features such as TF32 and cuDNN benchmark.",
+    )
+    parser.add_argument(
+        "--amp",
+        choices=["off", "auto", "fp16", "bf16"],
+        default="off",
+        help="Automatic mixed precision mode: off, auto, fp16, or bf16.",
+    )
     parser.add_argument("--save-json", default=None)
     args = parser.parse_args()
 
@@ -110,6 +121,8 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         num_workers=args.num_workers,
         seed=args.seed,
         device=args.device,
+        fast_cuda=args.fast_cuda,
+        amp=args.amp,
         save_json=args.save_json,
     )
     compare = None if args.compare is None else [normalize_algorithm_name(name) for name in args.compare]

@@ -24,15 +24,36 @@ def clip_model_update(
     clip_norm: float,
 ) -> tuple[OrderedDict[str, torch.Tensor], float, float]:
     clipped = clone_update(update)
-    total_norm = update_l2_norm(clipped)
+    total_norm, scale = clip_model_update_(clipped, clip_norm)
+    return clipped, total_norm, scale
+
+
+def clip_model_update_(
+    update: OrderedDict[str, torch.Tensor],
+    clip_norm: float,
+) -> tuple[float, float]:
+    total_norm = update_l2_norm(update)
     if total_norm == 0.0 or total_norm <= clip_norm:
-        return clipped, total_norm, 1.0
+        return total_norm, 1.0
 
     scale = clip_norm / (total_norm + 1e-12)
-    for name, tensor in clipped.items():
+    for tensor in update.values():
         if torch.is_floating_point(tensor):
-            clipped[name] = tensor * scale
-    return clipped, total_norm, scale
+            tensor.mul_(scale)
+    return total_norm, scale
+
+
+def add_gaussian_noise_(
+    update: OrderedDict[str, torch.Tensor],
+    noise_std: float,
+) -> OrderedDict[str, torch.Tensor]:
+    if noise_std <= 0:
+        return update
+
+    for tensor in update.values():
+        if torch.is_floating_point(tensor):
+            tensor.add_(torch.randn_like(tensor), alpha=noise_std)
+    return update
 
 
 def add_gaussian_noise(
@@ -40,13 +61,7 @@ def add_gaussian_noise(
     noise_std: float,
 ) -> OrderedDict[str, torch.Tensor]:
     noised = clone_update(update)
-    if noise_std <= 0:
-        return noised
-
-    for name, tensor in noised.items():
-        if torch.is_floating_point(tensor):
-            noised[name] = tensor + torch.randn_like(tensor) * noise_std
-    return noised
+    return add_gaussian_noise_(noised, noise_std)
 
 
 def _log_add(logx: float, logy: float) -> float:
