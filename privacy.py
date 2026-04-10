@@ -46,22 +46,24 @@ def clip_model_update_(
 def add_gaussian_noise_(
     update: OrderedDict[str, torch.Tensor],
     noise_std: float,
+    generator: torch.Generator | None = None,
 ) -> OrderedDict[str, torch.Tensor]:
     if noise_std <= 0:
         return update
 
     for tensor in update.values():
         if torch.is_floating_point(tensor):
-            tensor.add_(torch.randn_like(tensor), alpha=noise_std)
+            tensor.add_(torch.randn_like(tensor, generator=generator), alpha=noise_std)
     return update
 
 
 def add_gaussian_noise(
     update: OrderedDict[str, torch.Tensor],
     noise_std: float,
+    generator: torch.Generator | None = None,
 ) -> OrderedDict[str, torch.Tensor]:
     noised = clone_update(update)
-    return add_gaussian_noise_(noised, noise_std)
+    return add_gaussian_noise_(noised, noise_std, generator=generator)
 
 
 def _log_add(logx: float, logy: float) -> float:

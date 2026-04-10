@@ -1,4 +1,5 @@
 import argparse
+import sys
 
 from fednsam import FedNSAMConfig, compare_histories, normalize_algorithm_name, run_fednsam
 
@@ -62,7 +63,8 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--fast-cuda",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help="Enable non-deterministic CUDA speed features such as TF32 and cuDNN benchmark.",
     )
     parser.add_argument(
@@ -71,8 +73,26 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         default="off",
         help="Automatic mixed precision mode: off, auto, fp16, or bf16.",
     )
+    parser.add_argument("--ckpt-dir", default=None, help="Save rolling round-level checkpoints to this directory.")
+    parser.add_argument("--resume", default=None, help="Resume training from a saved checkpoint file.")
     parser.add_argument("--save-json", default=None)
     args = parser.parse_args()
+
+    argv = sys.argv[1:]
+    option_to_dest = {
+        option: action.dest
+        for action in parser._actions
+        for option in action.option_strings
+        if option.startswith("--")
+    }
+    explicit_fields: set[str] = set()
+    for token in argv:
+        if not token.startswith("--"):
+            continue
+        option = token.split("=", maxsplit=1)[0]
+        dest = option_to_dest.get(option)
+        if dest is not None:
+            explicit_fields.add(dest)
 
     dp_args_provided = any(
         value is not None
@@ -123,6 +143,10 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         device=args.device,
         fast_cuda=args.fast_cuda,
         amp=args.amp,
+        ckpt_dir=args.ckpt_dir,
+        resume=args.resume,
+        explicit_cli_fields=tuple(sorted(field for field in explicit_fields if field != "compare")),
+        explicit_compare="compare" in explicit_fields,
         save_json=args.save_json,
     )
     compare = None if args.compare is None else [normalize_algorithm_name(name) for name in args.compare]
@@ -131,7 +155,7 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
 
 if __name__ == "__main__":
     config, compare = parse_args()
-    if compare:
+    if compare or config.resume:
         compare_histories(config, compare)
     else:
         run_fednsam(config)

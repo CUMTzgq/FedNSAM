@@ -155,6 +155,49 @@ python main_FedNSAM.py \
 - `--fast-cuda`: 打开 `cudnn.benchmark`、TF32，并让卷积走 `channels_last`
 - `--amp auto`: CUDA 上优先用 `bf16`，否则自动回退到 `fp16`
 
+## Checkpoint 与恢复
+
+如果训练容易被中断，可以给实验加一个滚动 checkpoint 目录：
+
+```bash
+python main_FedNSAM.py \
+  --compare fedavg fedsam fednsam \
+  --dataset cifar10 \
+  --rounds 100 \
+  --num-clients 100 \
+  --client-fraction 0.1 \
+  --local-epochs 1 \
+  --local-steps 20 \
+  --batch-size 64 \
+  --lr 0.1 \
+  --rho 0.05 \
+  --gamma 0.85 \
+  --alpha 0.5 \
+  --device cuda \
+  --fast-cuda \
+  --amp auto \
+  --ckpt-dir checkpoints/cifar10_compare \
+  --save-json results/cifar10_compare.json
+```
+
+启用 `--ckpt-dir` 后：
+
+- 每轮会覆盖保存 `latest.pt`
+- 每个评估轮会原子刷新一次 `--save-json`
+- 如果训练在某一轮中断，最多只会丢失这一轮
+
+恢复时直接从 `latest.pt` 继续：
+
+```bash
+python main_FedNSAM.py \
+  --resume checkpoints/cifar10_compare/latest.pt \
+  --device cuda \
+  --fast-cuda \
+  --amp auto
+```
+
+恢复时会沿用 checkpoint 里的训练配置、数据划分、DP 配置和对比算法顺序；你只需要按需覆盖设备和输出相关参数。
+
 ## FedNSAM 主流程
 
 1. 服务器维护全局模型 `w_t` 和全局动量 `m_t`
