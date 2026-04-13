@@ -62,6 +62,17 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
+        "--devices",
+        nargs="+",
+        default=None,
+        help="Optional device list for compare-parallel mode, e.g. --devices cuda:0 cuda:1",
+    )
+    parser.add_argument(
+        "--compare-parallel",
+        action="store_true",
+        help="Run compared algorithms in parallel across multiple devices.",
+    )
+    parser.add_argument(
         "--fast-cuda",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -141,6 +152,8 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         num_workers=args.num_workers,
         seed=args.seed,
         device=args.device,
+        devices=() if args.devices is None else tuple(args.devices),
+        compare_parallel=args.compare_parallel,
         fast_cuda=args.fast_cuda,
         amp=args.amp,
         ckpt_dir=args.ckpt_dir,

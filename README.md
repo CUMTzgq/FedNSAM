@@ -82,6 +82,32 @@ python main_FedNSAM.py \
 
 这样 `FedAvg`、`FedSAM`、`FedNSAM` 的差异主要来自算法本身，而不是随机性。
 
+如果你有两张 GPU，可以显式打开算法级并行 compare：
+
+```bash
+python main_FedNSAM.py \
+  --compare fedavg fedsam fednsam \
+  --compare-parallel \
+  --devices cuda:0 cuda:1 \
+  --dataset cifar10 \
+  --rounds 100 \
+  --num-clients 100 \
+  --client-fraction 0.1 \
+  --local-epochs 1 \
+  --local-steps 20 \
+  --batch-size 64 \
+  --lr 0.1 \
+  --rho 0.05 \
+  --gamma 0.85 \
+  --alpha 0.5 \
+  --device cuda \
+  --fast-cuda \
+  --amp auto \
+  --save-json results/cifar10_compare_parallel.json
+```
+
+这一模式会把不同算法分配到不同设备上并行运行；如果只给了一个设备，或者启用了 `--ckpt-dir` / `--resume`，程序会自动回退到顺序 compare。
+
 ## Client-level DP
 
 直接指定 DP 裁剪阈值和噪声倍率：

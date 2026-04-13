@@ -2,7 +2,9 @@ import copy
 import json
 import math
 import os
+import queue
 import random
+import traceback
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
@@ -11,6 +13,7 @@ from typing import Callable, Iterable
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
@@ -22,7 +25,7 @@ from sam import SAM
 
 ExperimentHistory = dict[str, object]
 ProgressHook = Callable[[dict[str, object]], None]
-RUNTIME_OVERRIDE_FIELDS = {"device", "fast_cuda", "amp", "save_json", "ckpt_dir"}
+RUNTIME_OVERRIDE_FIELDS = {"device", "devices", "compare_parallel", "fast_cuda", "amp", "save_json", "ckpt_dir"}
 
 
 @dataclass
@@ -52,6 +55,8 @@ class FedNSAMConfig:
     num_workers: int = 0
     seed: int = 42
     device: str = "cuda"
+    devices: tuple[str, ...] = ()
+    compare_parallel: bool = False
     fast_cuda: bool = False
     amp: str = "off"
     save_json: str | None = None
@@ -87,6 +92,7 @@ def configure_torch_runtime(config: FedNSAMConfig, device: torch.device) -> None
     if device.type != "cuda":
         return
 
+    torch.cuda.set_device(device)
     torch.backends.cudnn.deterministic = not config.fast_cuda
     torch.backends.cudnn.benchmark = config.fast_cuda
     torch.backends.cuda.matmul.allow_tf32 = config.fast_cuda
@@ -121,6 +127,12 @@ def build_runtime_config(config: FedNSAMConfig) -> RuntimeConfig:
         channels_last=channels_last,
         use_grad_scaler=device.type == "cuda" and amp_dtype == torch.float16,
     )
+
+
+def resolve_compare_devices(config: FedNSAMConfig) -> tuple[str, ...]:
+    if config.devices:
+        return tuple(config.devices)
+    return (config.device,)
 
 
 def clone_state_dict(
@@ -969,6 +981,260 @@ def summarize_histories(histories: dict[str, ExperimentHistory], algorithms: lis
         print(summary)
 
 
+def order_histories(
+    histories: dict[str, ExperimentHistory],
+    algorithms: list[str],
+) -> dict[str, ExperimentHistory]:
+    return {algorithm: copy_history(histories[algorithm]) for algorithm in algorithms if algorithm in histories}
+
+
+def build_ordered_json_snapshot(
+    algorithms: list[str],
+    completed_histories: dict[str, ExperimentHistory],
+    active_histories: dict[str, ExperimentHistory] | None = None,
+) -> dict[str, ExperimentHistory]:
+    snapshot: dict[str, ExperimentHistory] = {}
+    for algorithm in algorithms:
+        if active_histories is not None and algorithm in active_histories:
+            snapshot[algorithm] = copy_history(active_histories[algorithm])
+        elif algorithm in completed_histories:
+            snapshot[algorithm] = copy_history(completed_histories[algorithm])
+    return snapshot
+
+
+def parallel_compare_disable_reason(
+    config: FedNSAMConfig,
+    algorithms: list[str],
+) -> str | None:
+    if not config.compare_parallel:
+        return "parallel compare not requested"
+    if config.resume is not None:
+        return "resume mode uses the sequential checkpoint path"
+    if config.ckpt_dir is not None:
+        return "--ckpt-dir currently supports only sequential compare"
+    if len(algorithms) < 2:
+        return "fewer than two algorithms were requested"
+    if len(resolve_compare_devices(config)) < 2:
+        return "fewer than two devices were provided"
+    return None
+
+
+def _parallel_compare_worker(
+    result_queue: mp.Queue,
+    config: FedNSAMConfig,
+    algorithm: str,
+    device_name: str,
+    shared_context: dict[str, object],
+    train_dataset,
+    test_dataset,
+) -> None:
+    try:
+        worker_config = copy.deepcopy(config)
+        worker_config.device = device_name
+        worker_config.devices = ()
+        worker_config.compare_parallel = False
+        worker_config.resume = None
+        worker_config.ckpt_dir = None
+        worker_config.save_json = None
+
+        runtime = build_runtime_config(worker_config)
+        normalized_context = normalize_shared_context(shared_context)
+        client_loaders = build_client_loaders(
+            train_dataset,
+            list(normalized_context["partitions"]),
+            worker_config,
+            runtime.device,
+        )
+        test_loader = build_test_loader(test_dataset, worker_config, runtime.device)
+        privacy_settings = dict(normalized_context["privacy_settings"])
+        eval_rounds = set(int(round_id) for round_id in normalized_context["eval_rounds"])
+        epsilon_trace = {
+            int(key): float(value) for key, value in dict(normalized_context["epsilon_trace"]).items()
+        }
+        initial_state = clone_state_dict(normalized_context["initial_state"])
+        num_classes = int(normalized_context["num_classes"])
+
+        def emit_progress(event: dict[str, object]) -> None:
+            if event["did_eval"]:
+                result_queue.put(
+                    {
+                        "type": "progress",
+                        "algorithm": algorithm,
+                        "round": int(event["round"]),
+                        "did_eval": True,
+                        "history": copy_history(event["history"]),
+                    }
+                )
+
+        history = run_single_experiment(
+            config=worker_config,
+            algorithm=algorithm,
+            initial_state=initial_state,
+            selection_schedule=list(normalized_context["selection_schedule"]),
+            num_classes=num_classes,
+            privacy_settings=privacy_settings,
+            runtime=runtime,
+            client_loaders=client_loaders,
+            test_loader=test_loader,
+            eval_rounds=eval_rounds,
+            epsilon_trace=epsilon_trace,
+            round_callback=emit_progress,
+        )
+        result_queue.put(
+            {
+                "type": "result",
+                "algorithm": algorithm,
+                "history": copy_history(history),
+            }
+        )
+    except BaseException as exc:
+        result_queue.put(
+            {
+                "type": "error",
+                "algorithm": algorithm,
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(),
+            }
+        )
+
+
+def terminate_parallel_workers(active_workers: dict[str, dict[str, object]]) -> None:
+    for worker in active_workers.values():
+        process = worker["process"]
+        if process.is_alive():
+            process.terminate()
+    for worker in active_workers.values():
+        process = worker["process"]
+        process.join(timeout=5)
+
+
+def compare_histories_parallel(
+    config: FedNSAMConfig,
+    algorithms: list[str],
+    *,
+    progress_hook: ProgressHook | None = None,
+) -> dict[str, ExperimentHistory]:
+    train_dataset, test_dataset, num_classes = build_cifar_datasets(config)
+    shared_context = build_shared_context(config, train_dataset, num_classes)
+    privacy_settings = dict(shared_context["privacy_settings"])
+    print_privacy_banner(privacy_settings)
+
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    pending_algorithms = list(algorithms)
+    idle_devices = list(resolve_compare_devices(config))
+    active_workers: dict[str, dict[str, object]] = {}
+    completed_histories: dict[str, ExperimentHistory] = {}
+    active_histories: dict[str, ExperimentHistory] = {}
+
+    def launch_worker(algorithm: str, device_name: str) -> None:
+        process = ctx.Process(
+            target=_parallel_compare_worker,
+            args=(
+                result_queue,
+                copy.deepcopy(config),
+                algorithm,
+                device_name,
+                normalize_shared_context(shared_context),
+                train_dataset,
+                test_dataset,
+            ),
+        )
+        process.start()
+        active_workers[algorithm] = {
+            "process": process,
+            "device": device_name,
+        }
+
+    try:
+        while pending_algorithms and idle_devices:
+            launch_worker(pending_algorithms.pop(0), idle_devices.pop(0))
+
+        while active_workers:
+            try:
+                message = result_queue.get(timeout=1.0)
+            except queue.Empty:
+                failed_worker = None
+                for algorithm, worker in active_workers.items():
+                    process = worker["process"]
+                    if process.exitcode not in (None, 0):
+                        failed_worker = (algorithm, process.exitcode)
+                        break
+                if failed_worker is not None:
+                    terminate_parallel_workers(active_workers)
+                    algorithm, exitcode = failed_worker
+                    raise RuntimeError(
+                        f"Parallel compare worker for {algorithm} exited unexpectedly with code {exitcode}."
+                    )
+                continue
+
+            message_type = str(message["type"])
+            algorithm = str(message["algorithm"])
+
+            if message_type == "progress":
+                history = copy_history(message["history"])
+                active_histories[algorithm] = history
+                if config.save_json:
+                    save_histories(
+                        build_ordered_json_snapshot(algorithms, completed_histories, active_histories),
+                        config.save_json,
+                    )
+                if progress_hook is not None:
+                    progress_hook(
+                        {
+                            "algorithm": algorithm,
+                            "round": int(message["round"]),
+                            "history": history,
+                            "global_state": None,
+                            "global_momentum": None,
+                            "did_eval": True,
+                        }
+                    )
+                continue
+
+            if message_type == "error":
+                terminate_parallel_workers(active_workers)
+                raise RuntimeError(
+                    f"Parallel compare worker for {algorithm} failed.\n{message['traceback']}"
+                )
+
+            if message_type != "result":
+                terminate_parallel_workers(active_workers)
+                raise RuntimeError(f"Unexpected parallel compare message type: {message_type}")
+
+            history = copy_history(message["history"])
+            completed_histories[algorithm] = history
+            active_histories.pop(algorithm, None)
+            worker = active_workers.pop(algorithm)
+            process = worker["process"]
+            process.join(timeout=5)
+            idle_devices.append(str(worker["device"]))
+
+            if config.save_json:
+                save_histories(
+                    build_ordered_json_snapshot(algorithms, completed_histories, active_histories),
+                    config.save_json,
+                )
+
+            if pending_algorithms and idle_devices:
+                launch_worker(pending_algorithms.pop(0), idle_devices.pop(0))
+    except BaseException:
+        terminate_parallel_workers(active_workers)
+        raise
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+
+    ordered_histories = order_histories(completed_histories, algorithms)
+    summarize_histories(ordered_histories, algorithms)
+
+    if config.save_json:
+        save_histories(ordered_histories, config.save_json)
+        print(f"Saved results to {config.save_json}")
+
+    return ordered_histories
+
+
 def compare_histories(
     config: FedNSAMConfig,
     algorithms: list[str] | None,
@@ -980,6 +1246,12 @@ def compare_histories(
         checkpoint = load_checkpoint(config.resume)
         config, algorithms = apply_resume_config(config, checkpoint, algorithms)
     resolved_algorithms = normalize_algorithms(algorithms, config.algorithm)
+
+    disable_reason = parallel_compare_disable_reason(config, resolved_algorithms)
+    if checkpoint is None and disable_reason is None:
+        return compare_histories_parallel(config, resolved_algorithms, progress_hook=progress_hook)
+    if config.compare_parallel and disable_reason is not None:
+        print(f"Compare-parallel disabled: {disable_reason}. Falling back to sequential compare.")
 
     set_random_seed(config.seed)
     runtime = build_runtime_config(config)
@@ -1094,13 +1366,14 @@ def compare_histories(
         if config.save_json:
             save_histories(build_json_snapshot(histories), config.save_json)
 
-    summarize_histories(histories, resolved_algorithms)
+    ordered_histories = order_histories(histories, resolved_algorithms)
+    summarize_histories(ordered_histories, resolved_algorithms)
 
     if config.save_json:
-        save_histories(histories, config.save_json)
+        save_histories(ordered_histories, config.save_json)
         print(f"Saved results to {config.save_json}")
 
-    return histories
+    return ordered_histories
 
 
 def run_fednsam(config: FedNSAMConfig) -> ExperimentHistory:
