@@ -135,6 +135,22 @@ def resolve_compare_devices(config: FedNSAMConfig) -> tuple[str, ...]:
     return (config.device,)
 
 
+def compare_parallel_thread_limit(config: FedNSAMConfig) -> int:
+    cpu_count = os.cpu_count() or 1
+    device_count = max(1, len(resolve_compare_devices(config)))
+    return max(1, cpu_count // device_count)
+
+
+def configure_parallel_worker_threads(config: FedNSAMConfig) -> None:
+    limit = compare_parallel_thread_limit(config)
+    torch.set_num_threads(limit)
+    if hasattr(torch, "set_num_interop_threads"):
+        try:
+            torch.set_num_interop_threads(max(1, min(4, limit)))
+        except RuntimeError:
+            pass
+
+
 def clone_state_dict(
     state_dict: OrderedDict[str, torch.Tensor],
     device: torch.device | None = None,
@@ -1025,10 +1041,10 @@ def _parallel_compare_worker(
     algorithm: str,
     device_name: str,
     shared_context: dict[str, object],
-    train_dataset,
-    test_dataset,
+    dataset_payload: tuple[object, object, int] | None,
 ) -> None:
     try:
+        configure_parallel_worker_threads(config)
         worker_config = copy.deepcopy(config)
         worker_config.device = device_name
         worker_config.devices = ()
@@ -1039,6 +1055,10 @@ def _parallel_compare_worker(
 
         runtime = build_runtime_config(worker_config)
         normalized_context = normalize_shared_context(shared_context)
+        if dataset_payload is None:
+            train_dataset, test_dataset, _ = build_cifar_datasets(worker_config)
+        else:
+            train_dataset, test_dataset, _ = dataset_payload
         client_loaders = build_client_loaders(
             train_dataset,
             list(normalized_context["partitions"]),
@@ -1123,6 +1143,11 @@ def compare_histories_parallel(
     result_queue = ctx.Queue()
     pending_algorithms = list(algorithms)
     idle_devices = list(resolve_compare_devices(config))
+    all_cpu_devices = all(resolve_device(device_name).type == "cpu" for device_name in idle_devices)
+    dataset_payload = (train_dataset, test_dataset, num_classes) if all_cpu_devices else None
+    if not all_cpu_devices:
+        del train_dataset
+        del test_dataset
     active_workers: dict[str, dict[str, object]] = {}
     completed_histories: dict[str, ExperimentHistory] = {}
     active_histories: dict[str, ExperimentHistory] = {}
@@ -1136,8 +1161,7 @@ def compare_histories_parallel(
                 algorithm,
                 device_name,
                 normalize_shared_context(shared_context),
-                train_dataset,
-                test_dataset,
+                dataset_payload,
             ),
         )
         process.start()
