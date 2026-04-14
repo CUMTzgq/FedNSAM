@@ -18,9 +18,18 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
-from dirichlet_data import build_dirichlet_partitions
+from dirichlet_data import (
+    build_dirichlet_partitions,
+    build_dpfedsam_client_test_partitions,
+    build_dpfedsam_dirichlet_partitions,
+)
 from models import resnet18_cifar
-from privacy import add_gaussian_noise_, clip_model_update_, compute_epsilon, solve_noise_multiplier
+from privacy import (
+    add_tensorwise_gaussian_noise_,
+    clip_tensor_updates_,
+    compute_epsilon,
+    solve_noise_multiplier,
+)
 from sam import SAM
 
 ExperimentHistory = dict[str, object]
@@ -40,7 +49,9 @@ class FedNSAMConfig:
     local_steps: int = 50
     batch_size: int = 50
     lr: float = 0.1
+    lr_decay: float = 1.0
     min_lr: float = 0.0
+    momentum: float = 0.0
     weight_decay: float = 1e-3
     rho: float = 0.05
     gamma: float = 0.85
@@ -72,6 +83,60 @@ class RuntimeConfig:
     amp_dtype: torch.dtype | None
     channels_last: bool
     use_grad_scaler: bool
+
+
+CONFIG_DEFAULTS = FedNSAMConfig()
+DP_FEDSAM_DEFAULTS: dict[str, object] = {
+    "rounds": 300,
+    "num_clients": 500,
+    "client_fraction": 0.1,
+    "local_epochs": 30,
+    "batch_size": 50,
+    "rho": 0.5,
+    "momentum": 0.5,
+    "weight_decay": 5e-4,
+    "lr_decay": 0.998,
+    "alpha": 0.6,
+}
+
+
+def field_was_explicitly_set(config: FedNSAMConfig, field_name: str) -> bool:
+    if config.explicit_cli_fields:
+        return field_name in config.explicit_cli_fields
+    return getattr(config, field_name) != getattr(CONFIG_DEFAULTS, field_name)
+
+
+def resolve_effective_config(config: FedNSAMConfig) -> FedNSAMConfig:
+    if not config.dp:
+        return copy.deepcopy(config)
+
+    resolved = copy.deepcopy(config)
+    for field_name, value in DP_FEDSAM_DEFAULTS.items():
+        if not field_was_explicitly_set(config, field_name):
+            setattr(resolved, field_name, value)
+    if not field_was_explicitly_set(config, "grad_clip"):
+        resolved.grad_clip = None
+    return resolved
+
+
+def dp_uses_local_step_cap(config: FedNSAMConfig) -> bool:
+    if not config.dp:
+        return True
+    return field_was_explicitly_set(config, "local_steps")
+
+
+def effective_local_step_limit(config: FedNSAMConfig) -> int | None:
+    if dp_uses_local_step_cap(config):
+        return config.local_steps
+    return None
+
+
+def effective_grad_clip(config: FedNSAMConfig) -> float | None:
+    if not config.dp:
+        return config.grad_clip
+    if field_was_explicitly_set(config, "grad_clip"):
+        return config.grad_clip
+    return None
 
 
 def set_random_seed(seed: int) -> None:
@@ -238,13 +303,32 @@ def build_eval_rounds(config: FedNSAMConfig) -> set[int]:
     return eval_rounds
 
 
+def cifar_mean_std(dataset: str, *, dp_aligned: bool) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    if dataset == "cifar10":
+        if dp_aligned:
+            return (0.49139968, 0.48215827, 0.44653124), (0.24703233, 0.24348505, 0.26158768)
+        return (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+    if dp_aligned:
+        return (0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762)
+    return (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
+
+
 def build_cifar_datasets(config: FedNSAMConfig):
-    mean = (0.4914, 0.4822, 0.4465)
-    std = (0.2023, 0.1994, 0.2010)
+    mean, std = cifar_mean_std(config.dataset, dp_aligned=config.dp)
+    train_transforms: list[object] = [
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+    ]
+    if config.dp:
+        train_transforms.extend(
+            [
+                transforms.RandomVerticalFlip(),
+                transforms.RandomGrayscale(),
+            ]
+        )
     train_transform = transforms.Compose(
-        [
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
+        train_transforms
+        + [
             transforms.ToTensor(),
             transforms.Normalize(mean, std),
         ]
@@ -265,6 +349,16 @@ def build_cifar_datasets(config: FedNSAMConfig):
 
 def build_client_selection_schedule(config: FedNSAMConfig) -> list[list[int]]:
     clients_per_round = selected_clients_per_round(config)
+    if config.dp:
+        schedule: list[list[int]] = []
+        for round_idx in range(config.rounds):
+            if config.num_clients == clients_per_round:
+                schedule.append(list(range(config.num_clients)))
+                continue
+            rng = np.random.RandomState(round_idx)
+            chosen = rng.choice(range(config.num_clients), clients_per_round, replace=False)
+            schedule.append(chosen.tolist())
+        return schedule
     rng = np.random.default_rng(config.seed + 7)
     return [
         rng.choice(config.num_clients, clients_per_round, replace=False).tolist()
@@ -306,6 +400,27 @@ def build_client_loaders(
     return loaders
 
 
+def build_client_eval_loaders(
+    test_dataset,
+    partitions: list[list[int]],
+    config: FedNSAMConfig,
+    device: torch.device,
+) -> list[DataLoader]:
+    loaders: list[DataLoader] = []
+    loader_kwargs = build_loader_kwargs(config, device)
+    for indices in partitions:
+        subset = Subset(test_dataset, indices)
+        loaders.append(
+            DataLoader(
+                subset,
+                batch_size=config.batch_size,
+                shuffle=False,
+                **loader_kwargs,
+            )
+        )
+    return loaders
+
+
 def set_round_loader_seed(
     loaders: list[DataLoader],
     seed: int,
@@ -335,6 +450,25 @@ def build_round_noise_generator(
     generator = torch.Generator(device=device.type)
     round_seed = seed + 1_000_000_007 + algorithm_seed_offset(algorithm) + (round_idx + 1) * 1_000_003
     generator.manual_seed(round_seed)
+    return generator
+
+
+def build_client_noise_generator(
+    seed: int,
+    algorithm: str,
+    round_idx: int,
+    client_id: int,
+    device: torch.device,
+) -> torch.Generator:
+    generator = torch.Generator(device=device.type)
+    client_seed = (
+        seed
+        + 2_000_000_033
+        + algorithm_seed_offset(algorithm)
+        + (round_idx + 1) * 1_000_003
+        + (client_id + 1) * 9_973
+    )
+    generator.manual_seed(client_seed)
     return generator
 
 
@@ -423,6 +557,24 @@ def evaluate(model: nn.Module, loader: DataLoader, runtime: RuntimeConfig) -> tu
     return total_correct / total_examples, total_loss / total_examples
 
 
+def evaluate_client_average(
+    model: nn.Module,
+    loaders: list[DataLoader],
+    runtime: RuntimeConfig,
+) -> tuple[float, float]:
+    client_accuracies: list[float] = []
+    client_losses: list[float] = []
+    for loader in loaders:
+        if len(loader.dataset) == 0:
+            continue
+        accuracy, loss = evaluate(model, loader, runtime)
+        client_accuracies.append(accuracy)
+        client_losses.append(loss)
+    if not client_accuracies:
+        return 0.0, 0.0
+    return float(np.mean(client_accuracies)), float(np.mean(client_losses))
+
+
 def run_local_sgd(
     model: nn.Module,
     loader: DataLoader,
@@ -434,10 +586,12 @@ def run_local_sgd(
     optimizer = torch.optim.SGD(
         model.parameters(),
         lr=lr,
-        momentum=0.0,
+        momentum=config.momentum,
         weight_decay=config.weight_decay,
     )
     scaler = torch.amp.GradScaler("cuda", enabled=True) if runtime.use_grad_scaler else None
+    step_limit = effective_local_step_limit(config)
+    grad_clip = effective_grad_clip(config)
 
     model.train()
     total_loss = 0.0
@@ -454,19 +608,19 @@ def run_local_sgd(
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                if config.grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                if grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
-                if config.grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                if grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
 
             total_loss += loss.item()
             total_steps += 1
-            if total_steps >= config.local_steps:
+            if step_limit is not None and total_steps >= step_limit:
                 stop = True
                 break
         if stop:
@@ -486,11 +640,14 @@ def run_local_sam(
         model.parameters(),
         torch.optim.SGD,
         lr=lr,
-        momentum=0.0,
+        momentum=config.momentum,
         weight_decay=config.weight_decay,
         rho=config.rho,
+        adaptive=config.dp,
     )
     scaler = torch.amp.GradScaler("cuda", enabled=True) if runtime.use_grad_scaler else None
+    step_limit = effective_local_step_limit(config)
+    grad_clip = effective_grad_clip(config)
 
     model.train()
     total_loss = 0.0
@@ -520,8 +677,8 @@ def run_local_sam(
                     optimizer.restore_step(zero_grad=True)
                     scaler.update()
                     continue
-                if config.grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                if grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.restore_step(zero_grad=False)
                 scaler.step(optimizer.base_optimizer)
                 scaler.update()
@@ -531,13 +688,13 @@ def run_local_sam(
                 if not gradients_are_finite(model):
                     optimizer.restore_step(zero_grad=True)
                     continue
-                if config.grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                if grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.second_step(zero_grad=True)
 
             total_loss += loss.item()
             total_steps += 1
-            if total_steps >= config.local_steps:
+            if step_limit is not None and total_steps >= step_limit:
                 stop = True
                 break
         if stop:
@@ -585,6 +742,7 @@ def resolve_privacy_settings(config: FedNSAMConfig, train_examples: int) -> dict
     if not config.dp:
         return {
             "enabled": False,
+            "style": None,
             "clip_norm": None,
             "noise_multiplier": None,
             "target_epsilon": None,
@@ -622,6 +780,7 @@ def resolve_privacy_settings(config: FedNSAMConfig, train_examples: int) -> dict
     )
     return {
         "enabled": True,
+        "style": "dpfedsam",
         "clip_norm": config.dp_clip_norm,
         "noise_multiplier": noise_multiplier,
         "target_epsilon": config.dp_target_epsilon,
@@ -650,6 +809,12 @@ def build_epsilon_trace(
         )
         epsilon_trace[step] = epsilon
     return epsilon_trace
+
+
+def round_learning_rate(round_idx: int, config: FedNSAMConfig) -> float:
+    if config.dp:
+        return config.lr * (config.lr_decay**round_idx)
+    return cosine_lr(round_idx, config)
 
 
 def copy_history(history: ExperimentHistory) -> ExperimentHistory:
@@ -783,17 +948,34 @@ def apply_resume_config(
 def build_shared_context(
     config: FedNSAMConfig,
     train_dataset,
+    test_dataset,
     num_classes: int,
 ) -> dict[str, object]:
     targets = np.asarray(train_dataset.targets)
-    client_sizes = build_equal_client_sizes(len(train_dataset), config.num_clients)
-    partitions = build_dirichlet_partitions(
-        targets=targets,
-        num_clients=config.num_clients,
-        alpha=config.alpha,
-        seed=config.seed,
-        client_sizes=client_sizes,
-    )
+    if config.dp:
+        partitions, train_class_counts = build_dpfedsam_dirichlet_partitions(
+            targets=targets,
+            num_clients=config.num_clients,
+            alpha=config.alpha,
+            seed=config.seed,
+        )
+        test_partitions = build_dpfedsam_client_test_partitions(
+            test_targets=np.asarray(test_dataset.targets),
+            train_class_counts=train_class_counts,
+            seed=config.seed,
+        )
+        evaluation_mode = "client_average"
+    else:
+        client_sizes = build_equal_client_sizes(len(train_dataset), config.num_clients)
+        partitions = build_dirichlet_partitions(
+            targets=targets,
+            num_clients=config.num_clients,
+            alpha=config.alpha,
+            seed=config.seed,
+            client_sizes=client_sizes,
+        )
+        test_partitions = None
+        evaluation_mode = "global"
     selection_schedule = build_client_selection_schedule(config)
     privacy_settings = resolve_privacy_settings(config, len(train_dataset))
     eval_rounds = build_eval_rounds(config)
@@ -809,6 +991,8 @@ def build_shared_context(
         "epsilon_trace": epsilon_trace,
         "initial_state": initial_state,
         "num_classes": num_classes,
+        "test_partitions": test_partitions,
+        "evaluation_mode": evaluation_mode,
     }
 
 
@@ -821,6 +1005,9 @@ def normalize_shared_context(shared_context: dict[str, object]) -> dict[str, obj
     normalized["epsilon_trace"] = {int(key): float(value) for key, value in shared_context["epsilon_trace"].items()}
     normalized["initial_state"] = clone_state_dict(shared_context["initial_state"])
     normalized["num_classes"] = int(shared_context["num_classes"])
+    test_partitions = shared_context.get("test_partitions")
+    normalized["test_partitions"] = None if test_partitions is None else [list(indices) for indices in test_partitions]
+    normalized["evaluation_mode"] = str(shared_context.get("evaluation_mode", "global"))
     return normalized
 
 
@@ -851,7 +1038,9 @@ def run_single_experiment(
     privacy_settings: dict[str, float | str | bool | None],
     runtime: RuntimeConfig,
     client_loaders: list[DataLoader],
-    test_loader: DataLoader,
+    test_loader: DataLoader | None,
+    client_test_loaders: list[DataLoader] | None,
+    evaluation_mode: str,
     eval_rounds: set[int],
     epsilon_trace: dict[int, float],
     start_round: int = 0,
@@ -887,6 +1076,8 @@ def run_single_experiment(
         "dp_delta": privacy_settings["delta"],
         "dp_sample_rate": privacy_settings["sample_rate"],
         "dp_source": privacy_settings["source"],
+        "dp_style": privacy_settings["style"],
+        "evaluation_mode": evaluation_mode,
     }
 
     banner = (
@@ -899,7 +1090,7 @@ def run_single_experiment(
 
     local_trainer = get_local_trainer(algorithm)
     for round_idx in range(start_round, config.rounds):
-        lr = cosine_lr(round_idx, config)
+        lr = round_learning_rate(round_idx, config)
         selected_clients = selection_schedule[round_idx]
         set_round_loader_seed(client_loaders, config.seed, round_idx, selected_clients)
         avg_delta = zero_update_like(global_state)
@@ -909,23 +1100,36 @@ def run_single_experiment(
             if algorithm == "fednsam"
             else global_state
         )
-        scale = 1.0 / len(selected_clients)
+        if privacy_settings["enabled"]:
+            total_client_examples = sum(len(client_loaders[client_id].dataset) for client_id in selected_clients)
+        else:
+            total_client_examples = len(selected_clients)
 
         for client_id in selected_clients:
             copy_state_into_model(work_model, reference_state)
             local_loss = local_trainer(work_model, client_loaders[client_id], lr, config, runtime)
             update = state_delta(reference_state, work_model.state_dict())
             if privacy_settings["enabled"]:
-                clip_model_update_(update, float(privacy_settings["clip_norm"]))
+                clip_tensor_updates_(update, float(privacy_settings["clip_norm"]))
+                noise_generator = build_client_noise_generator(
+                    config.seed,
+                    algorithm,
+                    round_idx,
+                    client_id,
+                    runtime.device,
+                )
+                add_tensorwise_gaussian_noise_(
+                    update,
+                    clip_norm=float(privacy_settings["clip_norm"]),
+                    noise_multiplier=float(privacy_settings["noise_multiplier"]),
+                    client_count=len(selected_clients),
+                    generator=noise_generator,
+                )
+                scale = len(client_loaders[client_id].dataset) / max(total_client_examples, 1)
+            else:
+                scale = 1.0 / len(selected_clients)
             accumulate_update_(avg_delta, update, scale)
             local_losses.append(local_loss)
-
-        if privacy_settings["enabled"]:
-            noise_std = (
-                float(privacy_settings["noise_multiplier"]) * float(privacy_settings["clip_norm"]) / len(selected_clients)
-            )
-            noise_generator = build_round_noise_generator(config.seed, algorithm, round_idx, runtime.device)
-            add_gaussian_noise_(avg_delta, noise_std, generator=noise_generator)
 
         if algorithm == "fednsam":
             update_global_momentum_(global_momentum, avg_delta, config.gamma)
@@ -937,7 +1141,14 @@ def run_single_experiment(
         did_eval = current_round in eval_rounds
         if did_eval:
             copy_state_into_model(work_model, global_state)
-            accuracy, test_loss = evaluate(work_model, test_loader, runtime)
+            if evaluation_mode == "client_average":
+                if client_test_loaders is None:
+                    raise ValueError("Client-average evaluation requires per-client test loaders.")
+                accuracy, test_loss = evaluate_client_average(work_model, client_test_loaders, runtime)
+            else:
+                if test_loader is None:
+                    raise ValueError("Global evaluation requires a test loader.")
+                accuracy, test_loss = evaluate(work_model, test_loader, runtime)
             history["round"].append(current_round)
             history["accuracy"].append(accuracy)
             history["loss"].append(test_loss)
@@ -1065,7 +1276,18 @@ def _parallel_compare_worker(
             worker_config,
             runtime.device,
         )
-        test_loader = build_test_loader(test_dataset, worker_config, runtime.device)
+        evaluation_mode = str(normalized_context.get("evaluation_mode", "global"))
+        if evaluation_mode == "client_average":
+            client_test_loaders = build_client_eval_loaders(
+                test_dataset,
+                list(normalized_context["test_partitions"]),
+                worker_config,
+                runtime.device,
+            )
+            test_loader = None
+        else:
+            client_test_loaders = None
+            test_loader = build_test_loader(test_dataset, worker_config, runtime.device)
         privacy_settings = dict(normalized_context["privacy_settings"])
         eval_rounds = set(int(round_id) for round_id in normalized_context["eval_rounds"])
         epsilon_trace = {
@@ -1096,6 +1318,8 @@ def _parallel_compare_worker(
             runtime=runtime,
             client_loaders=client_loaders,
             test_loader=test_loader,
+            client_test_loaders=client_test_loaders,
+            evaluation_mode=evaluation_mode,
             eval_rounds=eval_rounds,
             epsilon_trace=epsilon_trace,
             round_callback=emit_progress,
@@ -1135,7 +1359,7 @@ def compare_histories_parallel(
     progress_hook: ProgressHook | None = None,
 ) -> dict[str, ExperimentHistory]:
     train_dataset, test_dataset, num_classes = build_cifar_datasets(config)
-    shared_context = build_shared_context(config, train_dataset, num_classes)
+    shared_context = build_shared_context(config, train_dataset, test_dataset, num_classes)
     privacy_settings = dict(shared_context["privacy_settings"])
     print_privacy_banner(privacy_settings)
 
@@ -1269,6 +1493,8 @@ def compare_histories(
     if config.resume is not None:
         checkpoint = load_checkpoint(config.resume)
         config, algorithms = apply_resume_config(config, checkpoint, algorithms)
+    else:
+        config = resolve_effective_config(config)
     resolved_algorithms = normalize_algorithms(algorithms, config.algorithm)
 
     disable_reason = parallel_compare_disable_reason(config, resolved_algorithms)
@@ -1282,7 +1508,7 @@ def compare_histories(
     train_dataset, test_dataset, num_classes = build_cifar_datasets(config)
 
     if checkpoint is None:
-        shared_context = build_shared_context(config, train_dataset, num_classes)
+        shared_context = build_shared_context(config, train_dataset, test_dataset, num_classes)
         histories: dict[str, ExperimentHistory] = {}
         current_algorithm_index = 0
         current_algorithm = None
@@ -1303,7 +1529,18 @@ def compare_histories(
         config,
         runtime.device,
     )
-    test_loader = build_test_loader(test_dataset, config, runtime.device)
+    evaluation_mode = str(shared_context.get("evaluation_mode", "global"))
+    if evaluation_mode == "client_average":
+        client_test_loaders = build_client_eval_loaders(
+            test_dataset,
+            list(shared_context["test_partitions"]),
+            config,
+            runtime.device,
+        )
+        test_loader = None
+    else:
+        client_test_loaders = None
+        test_loader = build_test_loader(test_dataset, config, runtime.device)
     selection_schedule = list(shared_context["selection_schedule"])
     privacy_settings = dict(shared_context["privacy_settings"])
     eval_rounds = set(int(round_id) for round_id in shared_context["eval_rounds"])
@@ -1366,6 +1603,8 @@ def compare_histories(
             runtime=runtime,
             client_loaders=client_loaders,
             test_loader=test_loader,
+            client_test_loaders=client_test_loaders,
+            evaluation_mode=evaluation_mode,
             eval_rounds=eval_rounds,
             epsilon_trace=epsilon_trace,
             start_round=start_round,

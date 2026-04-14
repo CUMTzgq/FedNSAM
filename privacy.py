@@ -43,6 +43,43 @@ def clip_model_update_(
     return total_norm, scale
 
 
+def per_tensor_l2_norms(update: OrderedDict[str, torch.Tensor]) -> OrderedDict[str, float]:
+    norms: OrderedDict[str, float] = OrderedDict()
+    for name, tensor in update.items():
+        if torch.is_floating_point(tensor):
+            norms[name] = float(tensor.norm(2).item())
+    return norms
+
+
+def clip_tensor_updates(
+    update: OrderedDict[str, torch.Tensor],
+    clip_norm: float,
+) -> tuple[OrderedDict[str, torch.Tensor], OrderedDict[str, float], OrderedDict[str, float]]:
+    clipped = clone_update(update)
+    norms, scales = clip_tensor_updates_(clipped, clip_norm)
+    return clipped, norms, scales
+
+
+def clip_tensor_updates_(
+    update: OrderedDict[str, torch.Tensor],
+    clip_norm: float,
+) -> tuple[OrderedDict[str, float], OrderedDict[str, float]]:
+    norms: OrderedDict[str, float] = OrderedDict()
+    scales: OrderedDict[str, float] = OrderedDict()
+    for name, tensor in update.items():
+        if not torch.is_floating_point(tensor):
+            continue
+        tensor_norm = float(tensor.norm(2).item())
+        norms[name] = tensor_norm
+        if tensor_norm == 0.0 or tensor_norm <= clip_norm:
+            scales[name] = 1.0
+            continue
+        scale = clip_norm / (tensor_norm + 1e-12)
+        tensor.mul_(scale)
+        scales[name] = scale
+    return norms, scales
+
+
 def add_gaussian_noise_(
     update: OrderedDict[str, torch.Tensor],
     noise_std: float,
@@ -66,11 +103,25 @@ def add_gaussian_noise(
     return add_gaussian_noise_(noised, noise_std, generator=generator)
 
 
+def add_tensorwise_gaussian_noise_(
+    update: OrderedDict[str, torch.Tensor],
+    clip_norm: float,
+    noise_multiplier: float,
+    client_count: int,
+    generator: torch.Generator | None = None,
+) -> OrderedDict[str, torch.Tensor]:
+    if noise_multiplier <= 0 or client_count <= 0:
+        return update
+
+    noise_std = noise_multiplier * clip_norm / math.sqrt(client_count)
+    return add_gaussian_noise_(update, noise_std=noise_std, generator=generator)
+
+
 def _log_add(logx: float, logy: float) -> float:
-    lower, upper = min(logx, logy), max(logx, logy)
-    if lower == -np.inf:
-        return upper
-    return math.log1p(math.exp(lower - upper)) + upper
+    a, b = min(logx, logy), max(logx, logy)
+    if a == -np.inf:
+        return b
+    return math.log1p(math.exp(a - b)) + b
 
 
 def _log_sub(logx: float, logy: float) -> float:
@@ -87,38 +138,40 @@ def _log_sub(logx: float, logy: float) -> float:
 
 
 def _log_erfc(x: float) -> float:
-    return math.log(2) + special.log_ndtr(-x * math.sqrt(2))
+    return math.log(2) + special.log_ndtr(-x * 2**0.5)
 
 
-def _compute_log_a_for_int_alpha(sample_rate: float, noise_multiplier: float, alpha: int) -> float:
+def _compute_log_a_for_int_alpha(q: float, sigma: float, alpha: int) -> float:
     log_a = -np.inf
-    for index in range(alpha + 1):
-        log_coef = (
-            math.log(special.binom(alpha, index))
-            + index * math.log(sample_rate)
-            + (alpha - index) * math.log(1 - sample_rate)
+    for i in range(alpha + 1):
+        log_coef_i = (
+            math.log(special.binom(alpha, i))
+            + i * math.log(q)
+            + (alpha - i) * math.log(1 - q)
         )
-        log_term = log_coef + (index * index - index) / (2 * (noise_multiplier**2))
-        log_a = _log_add(log_a, log_term)
+        s = log_coef_i + (i * i - i) / (2 * (sigma**2))
+        log_a = _log_add(log_a, s)
     return float(log_a)
 
 
-def _compute_log_a_for_frac_alpha(sample_rate: float, noise_multiplier: float, alpha: float) -> float:
+def _compute_log_a_for_frac_alpha(q: float, sigma: float, alpha: float) -> float:
     log_a0, log_a1 = -np.inf, -np.inf
-    boundary = noise_multiplier**2 * math.log(1 / sample_rate - 1) + 0.5
-    index = 0
+    i = 0
+    z0 = sigma**2 * math.log(1 / q - 1) + 0.5
 
     while True:
-        coef = special.binom(alpha, index)
+        coef = special.binom(alpha, i)
         log_coef = math.log(abs(coef))
-        complement = alpha - index
+        j = alpha - i
 
-        log_t0 = log_coef + index * math.log(sample_rate) + complement * math.log(1 - sample_rate)
-        log_t1 = log_coef + complement * math.log(sample_rate) + index * math.log(1 - sample_rate)
-        log_e0 = math.log(0.5) + _log_erfc((index - boundary) / (math.sqrt(2) * noise_multiplier))
-        log_e1 = math.log(0.5) + _log_erfc((boundary - complement) / (math.sqrt(2) * noise_multiplier))
-        log_s0 = log_t0 + (index * index - index) / (2 * (noise_multiplier**2)) + log_e0
-        log_s1 = log_t1 + (complement * complement - complement) / (2 * (noise_multiplier**2)) + log_e1
+        log_t0 = log_coef + i * math.log(q) + j * math.log(1 - q)
+        log_t1 = log_coef + j * math.log(q) + i * math.log(1 - q)
+
+        log_e0 = math.log(0.5) + _log_erfc((i - z0) / (math.sqrt(2) * sigma))
+        log_e1 = math.log(0.5) + _log_erfc((z0 - j) / (math.sqrt(2) * sigma))
+
+        log_s0 = log_t0 + (i * i - i) / (2 * (sigma**2)) + log_e0
+        log_s1 = log_t1 + (j * j - j) / (2 * (sigma**2)) + log_e1
 
         if coef > 0:
             log_a0 = _log_add(log_a0, log_s0)
@@ -127,38 +180,38 @@ def _compute_log_a_for_frac_alpha(sample_rate: float, noise_multiplier: float, a
             log_a0 = _log_sub(log_a0, log_s0)
             log_a1 = _log_sub(log_a1, log_s1)
 
-        index += 1
+        i += 1
         if max(log_s0, log_s1) < -30:
             break
 
     return _log_add(log_a0, log_a1)
 
 
-def _compute_log_a(sample_rate: float, noise_multiplier: float, alpha: float) -> float:
+def _compute_log_a(q: float, sigma: float, alpha: float) -> float:
     if float(alpha).is_integer():
-        return _compute_log_a_for_int_alpha(sample_rate, noise_multiplier, int(alpha))
-    return _compute_log_a_for_frac_alpha(sample_rate, noise_multiplier, alpha)
+        return _compute_log_a_for_int_alpha(q, sigma, int(alpha))
+    return _compute_log_a_for_frac_alpha(q, sigma, alpha)
 
 
-def _compute_rdp(sample_rate: float, noise_multiplier: float, alpha: float) -> float:
-    if sample_rate == 0:
+def _compute_rdp(q: float, sigma: float, alpha: float) -> float:
+    if q == 0:
         return 0.0
-    if noise_multiplier == 0:
+    if sigma == 0:
         return np.inf
-    if sample_rate == 1.0:
-        return alpha / (2 * noise_multiplier**2)
+    if q == 1.0:
+        return alpha / (2 * sigma**2)
     if np.isinf(alpha):
         return np.inf
-    return _compute_log_a(sample_rate, noise_multiplier, alpha) / (alpha - 1)
+    return _compute_log_a(q, sigma, alpha) / (alpha - 1)
 
 
 def compute_rdp(
-    sample_rate: float,
+    q: float,
     noise_multiplier: float,
     steps: int,
     orders: Sequence[float],
 ) -> np.ndarray:
-    rdp = np.array([_compute_rdp(sample_rate, noise_multiplier, order) for order in orders], dtype=float)
+    rdp = np.array([_compute_rdp(q, noise_multiplier, order) for order in orders], dtype=float)
     return rdp * steps
 
 
@@ -167,23 +220,47 @@ def get_privacy_spent(
     rdp: Sequence[float],
     delta: float,
 ) -> tuple[float, float]:
-    orders_arr = np.asarray(orders, dtype=float)
-    rdp_arr = np.asarray(rdp, dtype=float)
+    orders_vec = np.atleast_1d(np.asarray(orders, dtype=float))
+    rdp_vec = np.atleast_1d(np.asarray(rdp, dtype=float))
+    if len(orders_vec) != len(rdp_vec):
+        raise ValueError(
+            "Input lists must have the same length.\n"
+            f"\torders_vec = {orders_vec}\n"
+            f"\trdp_vec = {rdp_vec}\n"
+        )
+
     eps = (
-        rdp_arr
-        - (np.log(delta) + np.log(orders_arr)) / (orders_arr - 1)
-        + np.log((orders_arr - 1) / orders_arr)
+        rdp_vec
+        - (np.log(delta) + np.log(orders_vec)) / (orders_vec - 1)
+        + np.log((orders_vec - 1) / orders_vec)
     )
     if np.isnan(eps).all():
         return np.inf, np.nan
 
-    optimal_index = np.nanargmin(eps)
-    epsilon = float(max(eps[optimal_index], 0.0))
-    return epsilon, float(orders_arr[optimal_index])
+    idx_opt = int(np.nanargmin(eps))
+    return float(max(eps[idx_opt], 0.0)), float(orders_vec[idx_opt])
 
 
 def default_rdp_orders() -> np.ndarray:
     return np.arange(1.01, 100.0, 0.05)
+
+
+def compute_epsilon_alpha(
+    noise_multiplier: float,
+    num_steps: int,
+    q: float,
+    delta: float,
+) -> tuple[float, float, float]:
+    alpha_list = default_rdp_orders()
+    rdp_list = compute_rdp(
+        q=q,
+        noise_multiplier=noise_multiplier,
+        steps=num_steps,
+        orders=alpha_list,
+    )
+    epsilon, alpha = get_privacy_spent(orders=alpha_list, rdp=rdp_list, delta=delta)
+    temp_rdp = float(rdp_list[list(alpha_list).index(alpha)])
+    return float(epsilon), float(alpha), temp_rdp
 
 
 def compute_epsilon(
@@ -198,14 +275,23 @@ def compute_epsilon(
     if noise_multiplier <= 0:
         raise ValueError("Noise multiplier must be positive.")
 
-    rdp_orders = default_rdp_orders() if orders is None else np.asarray(orders, dtype=float)
-    rdp = compute_rdp(
-        sample_rate=sample_rate,
+    if orders is not None:
+        rdp_orders = np.asarray(orders, dtype=float)
+        rdp = compute_rdp(
+            q=sample_rate,
+            noise_multiplier=noise_multiplier,
+            steps=steps,
+            orders=rdp_orders,
+        )
+        return get_privacy_spent(orders=rdp_orders, rdp=rdp, delta=delta)
+
+    epsilon, alpha, _ = compute_epsilon_alpha(
         noise_multiplier=noise_multiplier,
-        steps=steps,
-        orders=rdp_orders,
+        num_steps=steps,
+        q=sample_rate,
+        delta=delta,
     )
-    return get_privacy_spent(rdp=rdp, orders=rdp_orders, delta=delta)
+    return epsilon, alpha
 
 
 def solve_noise_multiplier(

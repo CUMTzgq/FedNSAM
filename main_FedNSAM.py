@@ -21,7 +21,9 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
     parser.add_argument("--local-steps", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=50)
     parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--lr-decay", type=float, default=1.0, help="Per-round exponential decay factor used by DP-FedSAM-style local training.")
     parser.add_argument("--min-lr", type=float, default=0.0)
+    parser.add_argument("--momentum", type=float, default=0.0, help="Local SGD momentum.")
     parser.add_argument("--weight-decay", type=float, default=1e-3)
     parser.add_argument("--rho", type=float, default=0.05)
     parser.add_argument("--gamma", type=float, default=0.85)
@@ -137,7 +139,9 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         local_steps=args.local_steps,
         batch_size=args.batch_size,
         lr=args.lr,
+        lr_decay=args.lr_decay,
         min_lr=args.min_lr,
+        momentum=args.momentum,
         weight_decay=args.weight_decay,
         rho=args.rho,
         gamma=args.gamma,

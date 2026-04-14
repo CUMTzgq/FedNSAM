@@ -110,6 +110,67 @@ python main_FedNSAM.py \
 
 ## Client-level DP
 
+当前 `--dp` 路径已经按 `DP-FedSAM` 的服务器端客户端级 DP 语义重构：
+
+- 每个客户端本地训练完成后，服务器计算客户端更新
+- 对每个浮点参数张量分别做 `L2` 裁剪
+- 对每个张量分别立刻加高斯噪声
+- 再对这些“已裁剪且已加噪”的客户端更新按样本数加权聚合
+- 隐私会计复用了 `DP-FedSAM/eps_computer.py` 的 RDP 实现
+
+DP 模式下如果你没有显式传入关键训练超参，会自动切到 `DP-FedSAM` 的论文默认值：
+
+- `rounds=300`
+- `num_clients=500`
+- `client_fraction=0.1`
+- `local_epochs=30`
+- `batch_size=50`
+- `rho=0.5`
+- `momentum=0.5`
+- `weight_decay=5e-4`
+- `lr_decay=0.998`
+- `alpha=0.6`
+
+同时还有两条 DP 专属规则：
+
+- `local_steps` 默认不生效，按完整 `local_epochs` 训练；只有显式传了 `--local-steps` 才会截断
+- `grad-clip` 默认关闭；只有显式传了 `--grad-clip` 才会启用
+
+最接近 `DP-FedSAM` 原论文的 CIFAR-10 命令可以直接写成：
+
+```bash
+python main_FedNSAM.py \
+  --algorithm fedsam \
+  --dataset cifar10 \
+  --dp \
+  --dp-clip 0.2 \
+  --sigma 0.95
+```
+
+上面这条命令没有额外显式传参时，会自动解析成接近论文的训练配置。
+
+如果你想把所有关键项都写全，等价的 paper-aligned 命令是：
+
+```bash
+python main_FedNSAM.py \
+  --algorithm fedsam \
+  --dataset cifar10 \
+  --rounds 300 \
+  --num-clients 500 \
+  --client-fraction 0.1 \
+  --local-epochs 30 \
+  --batch-size 50 \
+  --lr 0.1 \
+  --lr-decay 0.998 \
+  --momentum 0.5 \
+  --weight-decay 5e-4 \
+  --rho 0.5 \
+  --alpha 0.6 \
+  --dp \
+  --dp-clip 0.2 \
+  --sigma 0.95
+```
+
 直接指定 DP 裁剪阈值和噪声倍率：
 
 ```bash
@@ -154,6 +215,7 @@ python main_FedNSAM.py \
 ```
 
 启用 DP 后，会在每个评估点记录对应的 `epsilon`，并一起写入保存的 JSON 结果。
+另外，DP 模式下的 `test_acc / test_loss` 与 `DP-FedSAM` 一样，使用“各客户端测试集指标的简单平均”，不是全局 test loader 的单次评估。
 
 ## 单卡提速
 
