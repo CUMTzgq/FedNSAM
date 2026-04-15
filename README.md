@@ -217,6 +217,17 @@ python main_FedNSAM.py \
 启用 DP 后，会在每个评估点记录对应的 `epsilon`，并一起写入保存的 JSON 结果。
 另外，DP 模式下的 `test_acc / test_loss` 与 `DP-FedSAM` 一样，使用“各客户端测试集指标的简单平均”，不是全局 test loader 的单次评估。
 
+## 结果可视化
+
+训练完成后，可以直接把保存的结果 JSON 画成准确率曲线：
+
+```bash
+python plot_results.py results/cifar100_compare.json
+python plot_results.py results/cifar10_compare_dp.json --show
+```
+
+默认会把图片保存到 `figures/`，输出文件名形如 `figures/cifar100_compare_accuracy.png`。
+
 ## 单卡提速
 
 如果你只有一张 GPU，可以先打开这两个开关：

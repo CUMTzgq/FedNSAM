@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "matplotlib>=3.10.8",
     "scipy>=1.17.1",
     "tensorboardx>=2.6.5",
     "torch==2.10.0+cu126",
