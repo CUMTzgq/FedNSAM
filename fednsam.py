@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import math
 import os
@@ -352,21 +353,15 @@ def build_cifar_datasets(config: FedNSAMConfig):
 
 def build_client_selection_schedule(config: FedNSAMConfig) -> list[list[int]]:
     clients_per_round = selected_clients_per_round(config)
-    if config.dp:
-        schedule: list[list[int]] = []
-        for round_idx in range(config.rounds):
-            if config.num_clients == clients_per_round:
-                schedule.append(list(range(config.num_clients)))
-                continue
-            rng = np.random.RandomState(round_idx)
-            chosen = rng.choice(range(config.num_clients), clients_per_round, replace=False)
-            schedule.append(chosen.tolist())
-        return schedule
-    rng = np.random.default_rng(config.seed + 7)
-    return [
-        rng.choice(config.num_clients, clients_per_round, replace=False).tolist()
-        for _ in range(config.rounds)
-    ]
+    schedule: list[list[int]] = []
+    for round_idx in range(config.rounds):
+        if config.num_clients == clients_per_round:
+            schedule.append(list(range(config.num_clients)))
+            continue
+        rng = np.random.RandomState(config.seed + round_idx)
+        chosen = rng.choice(range(config.num_clients), clients_per_round, replace=False)
+        schedule.append(chosen.tolist())
+    return schedule
 
 
 def build_loader_kwargs(config: FedNSAMConfig, device: torch.device) -> dict[str, object]:
@@ -877,8 +872,8 @@ def atomic_torch_save(obj: object, output_path: Path) -> None:
             tmp_path.unlink(missing_ok=True)
 
 
-def save_histories(histories: dict[str, ExperimentHistory], output_path: str) -> None:
-    atomic_write_json(histories, output_path)
+def save_histories(payload: dict[str, object], output_path: str) -> None:
+    atomic_write_json(payload, output_path)
 
 
 def serialize_config(config: FedNSAMConfig) -> dict[str, object]:
@@ -899,6 +894,31 @@ def checkpoint_path(config: FedNSAMConfig) -> Path | None:
     if config.resume is not None:
         return Path(config.resume).resolve().parent / "latest.pt"
     return None
+
+
+def compute_context_hash(
+    partitions: list[list[int]],
+    selection_schedule: list[list[int]],
+    initial_state: OrderedDict[str, torch.Tensor],
+) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(json.dumps(partitions, separators=(",", ":")).encode("utf-8"))
+    hasher.update(json.dumps(selection_schedule, separators=(",", ":")).encode("utf-8"))
+    for name, tensor in initial_state.items():
+        detached = tensor.detach().cpu().contiguous()
+        hasher.update(name.encode("utf-8"))
+        hasher.update(str(detached.dtype).encode("utf-8"))
+        hasher.update(json.dumps(list(detached.shape), separators=(",", ":")).encode("utf-8"))
+        hasher.update(detached.numpy().tobytes())
+    return hasher.hexdigest()
+
+
+def build_fairness_metadata(shared_context: dict[str, object]) -> dict[str, object]:
+    return {
+        "seed": int(shared_context["seed"]),
+        "fairness_mode": str(shared_context["fairness_mode"]),
+        "context_hash": str(shared_context["context_hash"]),
+    }
 
 
 def save_latest_checkpoint(
@@ -1011,7 +1031,11 @@ def build_shared_context(
 
     set_random_seed(config.seed)
     initial_state = clone_state_dict(resnet18_cifar(num_classes=num_classes).state_dict())
+    context_hash = compute_context_hash(partitions, selection_schedule, initial_state)
     return {
+        "seed": config.seed,
+        "fairness_mode": "seeded_shared_context",
+        "context_hash": context_hash,
         "partitions": partitions,
         "selection_schedule": selection_schedule,
         "privacy_settings": privacy_settings,
@@ -1026,6 +1050,8 @@ def build_shared_context(
 
 def normalize_shared_context(shared_context: dict[str, object]) -> dict[str, object]:
     normalized = dict(shared_context)
+    normalized["seed"] = int(shared_context.get("seed", 42))
+    normalized["fairness_mode"] = str(shared_context.get("fairness_mode", "seeded_shared_context"))
     normalized["partitions"] = [list(indices) for indices in shared_context["partitions"]]
     normalized["selection_schedule"] = [list(indices) for indices in shared_context["selection_schedule"]]
     normalized["privacy_settings"] = dict(shared_context["privacy_settings"])
@@ -1036,6 +1062,14 @@ def normalize_shared_context(shared_context: dict[str, object]) -> dict[str, obj
     test_partitions = shared_context.get("test_partitions")
     normalized["test_partitions"] = None if test_partitions is None else [list(indices) for indices in test_partitions]
     normalized["evaluation_mode"] = str(shared_context.get("evaluation_mode", "global"))
+    normalized["context_hash"] = str(
+        shared_context.get("context_hash")
+        or compute_context_hash(
+            normalized["partitions"],
+            normalized["selection_schedule"],
+            normalized["initial_state"],
+        )
+    )
     return normalized
 
 
@@ -1260,6 +1294,16 @@ def order_histories(
     return {algorithm: copy_history(histories[algorithm]) for algorithm in algorithms if algorithm in histories}
 
 
+def build_result_payload(
+    histories: dict[str, ExperimentHistory],
+    fairness_metadata: dict[str, object],
+) -> dict[str, object]:
+    payload: dict[str, object] = {"_meta": dict(fairness_metadata)}
+    for algorithm, history in histories.items():
+        payload[algorithm] = copy_history(history)
+    return payload
+
+
 def build_ordered_json_snapshot(
     algorithms: list[str],
     completed_histories: dict[str, ExperimentHistory],
@@ -1405,6 +1449,7 @@ def compare_histories_parallel(
 ) -> dict[str, ExperimentHistory]:
     train_dataset, test_dataset, num_classes = build_cifar_datasets(config)
     shared_context = build_shared_context(config, train_dataset, test_dataset, num_classes)
+    fairness_metadata = build_fairness_metadata(shared_context)
     privacy_settings = dict(shared_context["privacy_settings"])
     print_privacy_banner(privacy_settings)
 
@@ -1469,7 +1514,10 @@ def compare_histories_parallel(
                 active_histories[algorithm] = history
                 if config.save_json:
                     save_histories(
-                        build_ordered_json_snapshot(algorithms, completed_histories, active_histories),
+                        build_result_payload(
+                            build_ordered_json_snapshot(algorithms, completed_histories, active_histories),
+                            fairness_metadata,
+                        ),
                         config.save_json,
                     )
                 if progress_hook is not None:
@@ -1505,7 +1553,10 @@ def compare_histories_parallel(
 
             if config.save_json:
                 save_histories(
-                    build_ordered_json_snapshot(algorithms, completed_histories, active_histories),
+                    build_result_payload(
+                        build_ordered_json_snapshot(algorithms, completed_histories, active_histories),
+                        fairness_metadata,
+                    ),
                     config.save_json,
                 )
 
@@ -1522,7 +1573,7 @@ def compare_histories_parallel(
     summarize_histories(ordered_histories, algorithms)
 
     if config.save_json:
-        save_histories(ordered_histories, config.save_json)
+        save_histories(build_result_payload(ordered_histories, fairness_metadata), config.save_json)
         print(f"Saved results to {config.save_json}")
 
     return ordered_histories
@@ -1591,11 +1642,12 @@ def compare_histories(
     eval_rounds = set(int(round_id) for round_id in shared_context["eval_rounds"])
     epsilon_trace = {int(key): float(value) for key, value in dict(shared_context["epsilon_trace"]).items()}
     initial_state = clone_state_dict(shared_context["initial_state"])
+    fairness_metadata = build_fairness_metadata(shared_context)
 
     print_privacy_banner(privacy_settings)
 
     if config.save_json and histories:
-        save_histories(build_json_snapshot(histories), config.save_json)
+        save_histories(build_result_payload(build_json_snapshot(histories), fairness_metadata), config.save_json)
 
     for algorithm_index in range(current_algorithm_index, len(resolved_algorithms)):
         algorithm = resolved_algorithms[algorithm_index]
@@ -1634,7 +1686,7 @@ def compare_histories(
             )
             if event["did_eval"] and config.save_json:
                 snapshot = build_json_snapshot(histories, str(event["algorithm"]), current_history)
-                save_histories(snapshot, config.save_json)
+                save_histories(build_result_payload(snapshot, fairness_metadata), config.save_json)
             if progress_hook is not None:
                 progress_hook(event)
 
@@ -1672,13 +1724,13 @@ def compare_histories(
             shared_context=shared_context,
         )
         if config.save_json:
-            save_histories(build_json_snapshot(histories), config.save_json)
+            save_histories(build_result_payload(build_json_snapshot(histories), fairness_metadata), config.save_json)
 
     ordered_histories = order_histories(histories, resolved_algorithms)
     summarize_histories(ordered_histories, resolved_algorithms)
 
     if config.save_json:
-        save_histories(ordered_histories, config.save_json)
+        save_histories(build_result_payload(ordered_histories, fairness_metadata), config.save_json)
         print(f"Saved results to {config.save_json}")
 
     return ordered_histories

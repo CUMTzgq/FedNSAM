@@ -30,6 +30,8 @@ def load_result_file(path: Path) -> dict[str, dict[str, object]]:
 
     normalized: dict[str, dict[str, object]] = {}
     for algorithm, payload in data.items():
+        if str(algorithm).startswith("_"):
+            continue
         if not isinstance(payload, dict):
             raise ValueError(f"{path} -> {algorithm} is not a JSON object.")
 
@@ -49,6 +51,9 @@ def load_result_file(path: Path) -> dict[str, dict[str, object]]:
             "round": [int(value) for value in rounds],
             "accuracy": [float(value) * 100.0 for value in accuracy],
         }
+
+    if not normalized:
+        raise ValueError(f"{path} does not contain any algorithm result entries.")
 
     return normalized
 
