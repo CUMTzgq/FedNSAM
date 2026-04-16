@@ -141,6 +141,14 @@ DP 模式下如果你没有显式传入关键训练超参，会自动切到 `DP-
 - `local_steps` 默认不生效，按完整 `local_epochs` 训练；只有显式传了 `--local-steps` 才会截断
 - `grad-clip` 默认关闭；只有显式传了 `--grad-clip` 才会启用
 
+如果你想让 DP 裁剪阈值按轮逐步变小，也可以开启公开、确定性的指数日程：
+
+- `--dp-clip-decay` 控制衰减系数 `lambda`
+- `--dp-clip-min` 控制裁剪阈值下界 `C_min`
+- 实际使用的当轮阈值为 `C_t = max(C_min, C0 * lambda^t)`
+
+这条 schedule 只会改变每轮的裁剪强度和绝对噪声大小；当前隐私会计仍然只依赖 `sigma / q / steps / delta`，所以在固定这些量时，`epsilon` 不会因为 `dp-clip-decay` 而改变。
+
 最接近 `DP-FedSAM` 原论文的 CIFAR-10 命令可以直接写成：
 
 ```bash
@@ -181,6 +189,22 @@ python main_FedNSAM.py \
 ```bash
   --lr-schedule cosine
 ```
+
+如果你希望前期阈值大一点、后期阈值小一点，可以额外加上：
+
+```bash
+  --dp-clip-decay 0.998 \
+  --dp-clip-min 0.05
+```
+
+第一版建议优先试：
+
+- `--dp-clip-decay 0.995`
+- `--dp-clip-decay 0.998`
+- `--dp-clip-decay 0.999`
+- `--dp-clip-min 0.05`
+- `--dp-clip-min 0.1`
+- `--dp-clip-min 0.2`
 
 直接指定 DP 裁剪阈值和噪声倍率：
 

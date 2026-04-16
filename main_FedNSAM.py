@@ -43,6 +43,20 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         default=None,
         help="client-level DP clip norm / clipping threshold C",
     )
+    parser.add_argument(
+        "--dp-clip-decay",
+        dest="dp_clip_decay",
+        type=float,
+        default=1.0,
+        help="per-round exponential decay factor for the DP clip threshold",
+    )
+    parser.add_argument(
+        "--dp-clip-min",
+        dest="dp_clip_min",
+        type=float,
+        default=None,
+        help="minimum DP clip threshold reached by the decay schedule",
+    )
     dp_group = parser.add_mutually_exclusive_group()
     dp_group.add_argument(
         "--sigma",
@@ -115,18 +129,30 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
 
     dp_args_provided = any(
         value is not None
-        for value in (args.dp_clip_norm, args.dp_noise_multiplier, args.dp_target_epsilon, args.dp_delta)
+        for value in (
+            args.dp_clip_norm,
+            args.dp_noise_multiplier,
+            args.dp_target_epsilon,
+            args.dp_delta,
+            args.dp_clip_min,
+        )
     )
     if args.dp:
         if args.dp_clip_norm is None:
             parser.error("--dp requires --dp-clip.")
         if args.dp_noise_multiplier is None and args.dp_target_epsilon is None:
             parser.error("--dp requires exactly one of --sigma or --eps.")
-    elif dp_args_provided:
+    elif dp_args_provided or args.dp_clip_decay != 1.0:
         parser.error("DP options require --dp.")
 
     if args.dp_clip_norm is not None and args.dp_clip_norm <= 0:
         parser.error("--dp-clip must be positive.")
+    if args.dp_clip_decay <= 0:
+        parser.error("--dp-clip-decay must be positive.")
+    if args.dp_clip_min is not None and args.dp_clip_min <= 0:
+        parser.error("--dp-clip-min must be positive.")
+    if args.dp_clip_norm is not None and args.dp_clip_min is not None and args.dp_clip_min > args.dp_clip_norm:
+        parser.error("--dp-clip-min cannot exceed --dp-clip.")
     if args.dp_noise_multiplier is not None and args.dp_noise_multiplier <= 0:
         parser.error("--sigma must be positive.")
     if args.dp_target_epsilon is not None and args.dp_target_epsilon <= 0:
@@ -156,6 +182,8 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         grad_clip=args.grad_clip,
         dp=args.dp,
         dp_clip_norm=args.dp_clip_norm,
+        dp_clip_decay=args.dp_clip_decay,
+        dp_clip_min=args.dp_clip_min,
         dp_noise_multiplier=args.dp_noise_multiplier,
         dp_target_epsilon=args.dp_target_epsilon,
         dp_delta=args.dp_delta,

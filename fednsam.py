@@ -60,6 +60,8 @@ class FedNSAMConfig:
     grad_clip: float | None = 10.0
     dp: bool = False
     dp_clip_norm: float | None = None
+    dp_clip_decay: float = 1.0
+    dp_clip_min: float | None = None
     dp_noise_multiplier: float | None = None
     dp_target_epsilon: float | None = None
     dp_delta: float | None = None
@@ -745,6 +747,9 @@ def resolve_privacy_settings(config: FedNSAMConfig, train_examples: int) -> dict
             "enabled": False,
             "style": None,
             "clip_norm": None,
+            "clip_schedule": None,
+            "clip_decay": None,
+            "clip_min": None,
             "noise_multiplier": None,
             "target_epsilon": None,
             "delta": None,
@@ -756,6 +761,7 @@ def resolve_privacy_settings(config: FedNSAMConfig, train_examples: int) -> dict
 
     if config.dp_clip_norm is None:
         raise ValueError("DP is enabled but no clip norm was provided.")
+    clip_min = config.dp_clip_norm if config.dp_clip_min is None else config.dp_clip_min
 
     delta = config.dp_delta if config.dp_delta is not None else 1.0 / train_examples
     sample_rate = selected_clients_per_round(config) / config.num_clients
@@ -783,6 +789,9 @@ def resolve_privacy_settings(config: FedNSAMConfig, train_examples: int) -> dict
         "enabled": True,
         "style": "dpfedsam",
         "clip_norm": config.dp_clip_norm,
+        "clip_schedule": "exp",
+        "clip_decay": config.dp_clip_decay,
+        "clip_min": clip_min,
         "noise_multiplier": noise_multiplier,
         "target_epsilon": config.dp_target_epsilon,
         "delta": delta,
@@ -810,6 +819,18 @@ def build_epsilon_trace(
         )
         epsilon_trace[step] = epsilon
     return epsilon_trace
+
+
+def resolve_round_clip_norm(
+    round_idx: int,
+    privacy_settings: dict[str, float | str | bool | None],
+) -> float:
+    if not privacy_settings["enabled"]:
+        raise ValueError("Round clip norm is only defined when DP is enabled.")
+    clip_norm = float(privacy_settings["clip_norm"])
+    clip_decay = float(privacy_settings.get("clip_decay") or 1.0)
+    clip_min = float(privacy_settings.get("clip_min") or clip_norm)
+    return max(clip_min, clip_norm * (clip_decay**round_idx))
 
 
 def round_learning_rate(round_idx: int, config: FedNSAMConfig) -> float:
@@ -1024,6 +1045,8 @@ def print_privacy_banner(privacy_settings: dict[str, float | str | bool | None])
     print(
         "DP enabled | "
         f"clip={float(privacy_settings['clip_norm']):.4f} | "
+        f"clip_decay={float(privacy_settings.get('clip_decay') or 1.0):.6f} | "
+        f"clip_min={float(privacy_settings.get('clip_min') or privacy_settings['clip_norm']):.4f} | "
         f"sigma={float(privacy_settings['noise_multiplier']):.6f} | "
         f"delta={float(privacy_settings['delta']):.6g} | "
         f"q={float(privacy_settings['sample_rate']):.4f}"
@@ -1078,6 +1101,10 @@ def run_single_experiment(
         "epsilon": [],
         "dp_enabled": privacy_settings["enabled"],
         "dp_clip_norm": privacy_settings["clip_norm"],
+        "dp_clip_schedule": privacy_settings.get("clip_schedule"),
+        "dp_clip_decay": privacy_settings.get("clip_decay"),
+        "dp_clip_min": privacy_settings.get("clip_min"),
+        "clip_norm": [],
         "dp_noise_multiplier": privacy_settings["noise_multiplier"],
         "dp_target_epsilon": privacy_settings["target_epsilon"],
         "dp_delta": privacy_settings["delta"],
@@ -1086,6 +1113,10 @@ def run_single_experiment(
         "dp_style": privacy_settings["style"],
         "evaluation_mode": evaluation_mode,
     }
+    history.setdefault("clip_norm", [])
+    history.setdefault("dp_clip_schedule", privacy_settings.get("clip_schedule"))
+    history.setdefault("dp_clip_decay", privacy_settings.get("clip_decay"))
+    history.setdefault("dp_clip_min", privacy_settings.get("clip_min"))
 
     banner = (
         f"{algorithm.upper()} | dataset={config.dataset} | clients={config.num_clients} | "
@@ -1102,6 +1133,7 @@ def run_single_experiment(
         set_round_loader_seed(client_loaders, config.seed, round_idx, selected_clients)
         avg_delta = zero_update_like(global_state)
         local_losses: list[float] = []
+        round_clip_norm = resolve_round_clip_norm(round_idx, privacy_settings) if privacy_settings["enabled"] else None
         reference_state = (
             apply_update(global_state, global_momentum, alpha=config.gamma)
             if algorithm == "fednsam"
@@ -1117,7 +1149,7 @@ def run_single_experiment(
             local_loss = local_trainer(work_model, client_loaders[client_id], lr, config, runtime)
             update = state_delta(reference_state, work_model.state_dict())
             if privacy_settings["enabled"]:
-                clip_tensor_updates_(update, float(privacy_settings["clip_norm"]))
+                clip_tensor_updates_(update, float(round_clip_norm))
                 noise_generator = build_client_noise_generator(
                     config.seed,
                     algorithm,
@@ -1127,7 +1159,7 @@ def run_single_experiment(
                 )
                 add_tensorwise_gaussian_noise_(
                     update,
-                    clip_norm=float(privacy_settings["clip_norm"]),
+                    clip_norm=float(round_clip_norm),
                     noise_multiplier=float(privacy_settings["noise_multiplier"]),
                     client_count=len(selected_clients),
                     generator=noise_generator,
@@ -1160,11 +1192,17 @@ def run_single_experiment(
             history["accuracy"].append(accuracy)
             history["loss"].append(test_loss)
             if privacy_settings["enabled"]:
+                history["clip_norm"].append(float(round_clip_norm))
                 history["epsilon"].append(epsilon_trace[current_round])
             print(
                 f"{algorithm.upper()} round={current_round:03d} | lr={lr:.5f} | "
                 f"local_loss={np.mean(local_losses):.4f} | test_loss={test_loss:.4f} | "
                 f"test_acc={accuracy * 100:.2f}%"
+                + (
+                    f" | clip={history['clip_norm'][-1]:.4f}"
+                    if privacy_settings["enabled"] and history["clip_norm"]
+                    else ""
+                )
                 + (
                     f" | eps={history['epsilon'][-1]:.4f}"
                     if privacy_settings["enabled"] and history["epsilon"]
