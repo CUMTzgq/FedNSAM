@@ -21,6 +21,12 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
     parser.add_argument("--local-steps", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=50)
     parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument(
+        "--lr-schedule",
+        choices=["auto", "cosine", "exp"],
+        default="auto",
+        help="Learning-rate schedule. 'auto' keeps the current default: cosine for non-DP, exponential for DP.",
+    )
     parser.add_argument("--lr-decay", type=float, default=1.0, help="Per-round exponential decay factor used by DP-FedSAM-style local training.")
     parser.add_argument("--min-lr", type=float, default=0.0)
     parser.add_argument("--momentum", type=float, default=0.0, help="Local SGD momentum.")
@@ -139,6 +145,7 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         local_steps=args.local_steps,
         batch_size=args.batch_size,
         lr=args.lr,
+        lr_schedule=args.lr_schedule,
         lr_decay=args.lr_decay,
         min_lr=args.min_lr,
         momentum=args.momentum,

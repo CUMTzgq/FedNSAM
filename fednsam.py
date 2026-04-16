@@ -49,6 +49,7 @@ class FedNSAMConfig:
     local_steps: int = 50
     batch_size: int = 50
     lr: float = 0.1
+    lr_schedule: str = "auto"
     lr_decay: float = 1.0
     min_lr: float = 0.0
     momentum: float = 0.0
@@ -812,6 +813,12 @@ def build_epsilon_trace(
 
 
 def round_learning_rate(round_idx: int, config: FedNSAMConfig) -> float:
+    if config.lr_schedule == "cosine":
+        return cosine_lr(round_idx, config)
+    if config.lr_schedule == "exp":
+        return config.lr * (config.lr_decay**round_idx)
+    if config.lr_schedule != "auto":
+        raise ValueError(f"Unsupported lr schedule: {config.lr_schedule}")
     if config.dp:
         return config.lr * (config.lr_decay**round_idx)
     return cosine_lr(round_idx, config)

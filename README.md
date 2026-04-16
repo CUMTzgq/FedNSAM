@@ -131,6 +131,11 @@ DP 模式下如果你没有显式传入关键训练超参，会自动切到 `DP-
 - `lr_decay=0.998`
 - `alpha=0.6`
 
+学习率调度现在也支持显式切换：
+
+- 默认 `--lr-schedule auto`：非 DP 走余弦，DP 走 `DP-FedSAM` 风格指数衰减
+- 如果你想让 DP 也用余弦学习率，可以显式传 `--lr-schedule cosine`
+
 同时还有两条 DP 专属规则：
 
 - `local_steps` 默认不生效，按完整 `local_epochs` 训练；只有显式传了 `--local-steps` 才会截断
@@ -169,6 +174,12 @@ python main_FedNSAM.py \
   --dp \
   --dp-clip 0.2 \
   --sigma 0.95
+```
+
+如果你希望在 DP 下改用余弦学习率，可以在上面的命令后追加：
+
+```bash
+  --lr-schedule cosine
 ```
 
 直接指定 DP 裁剪阈值和噪声倍率：
