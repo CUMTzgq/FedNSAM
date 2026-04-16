@@ -1,7 +1,16 @@
 import argparse
 import sys
+from pathlib import Path
 
-from fednsam import FedNSAMConfig, compare_histories, normalize_algorithm_name, run_fednsam
+from fednsam import (
+    FedNSAMConfig,
+    compare_histories,
+    configure_run_logging,
+    finalize_run_logging,
+    format_command_for_log,
+    normalize_algorithm_name,
+    run_fednsam,
+)
 
 
 def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
@@ -207,7 +216,15 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
 
 if __name__ == "__main__":
     config, compare = parse_args()
-    if compare or config.resume:
-        compare_histories(config, compare)
+    command = format_command_for_log(Path(sys.argv[0]).name, sys.argv[1:])
+    configure_run_logging(config, command)
+    try:
+        if compare or config.resume:
+            compare_histories(config, compare)
+        else:
+            run_fednsam(config)
+    except BaseException:
+        finalize_run_logging("failed")
+        raise
     else:
-        run_fednsam(config)
+        finalize_run_logging("completed")

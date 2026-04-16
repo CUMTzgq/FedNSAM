@@ -5,10 +5,12 @@ import math
 import os
 import queue
 import random
+import shlex
 import traceback
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -36,6 +38,9 @@ from sam import SAM
 ExperimentHistory = dict[str, object]
 ProgressHook = Callable[[dict[str, object]], None]
 RUNTIME_OVERRIDE_FIELDS = {"device", "devices", "compare_parallel", "fast_cuda", "amp", "save_json", "ckpt_dir"}
+RUN_LOG_PATH_ENV = "FEDNSAM_RUN_LOG_PATH"
+RUN_COMMAND_ENV = "FEDNSAM_RUN_COMMAND"
+RUN_START_TIME_ENV = "FEDNSAM_RUN_START_TIME"
 
 
 @dataclass
@@ -218,6 +223,103 @@ def configure_parallel_worker_threads(config: FedNSAMConfig) -> None:
             torch.set_num_interop_threads(max(1, min(4, limit)))
         except RuntimeError:
             pass
+
+
+def resolve_run_log_path(config: FedNSAMConfig) -> str | None:
+    if config.save_json is None:
+        return None
+    return str(Path(config.save_json).with_suffix(".log"))
+
+
+def format_command_for_log(program_name: str, argv: list[str]) -> str:
+    head = f"python {shlex.quote(program_name)}"
+    if not argv:
+        return head
+
+    grouped: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token.startswith("--"):
+            group = [token]
+            index += 1
+            while index < len(argv) and not argv[index].startswith("--"):
+                group.append(argv[index])
+                index += 1
+            grouped.append(" ".join(shlex.quote(part) for part in group))
+        else:
+            grouped.append(shlex.quote(token))
+            index += 1
+
+    return head + " \\\n  " + " \\\n  ".join(grouped)
+
+
+def configure_run_logging(config: FedNSAMConfig, command: str | None = None) -> str | None:
+    log_path = os.environ.get(RUN_LOG_PATH_ENV) or resolve_run_log_path(config)
+    if log_path is None:
+        return None
+
+    os.environ[RUN_LOG_PATH_ENV] = log_path
+    if command is not None:
+        os.environ[RUN_COMMAND_ENV] = command
+        start_time = datetime.now()
+        os.environ[RUN_START_TIME_ENV] = start_time.isoformat(timespec="seconds")
+        header = (
+            "\n"
+            + "=" * 80
+            + "\n"
+            + f"Started: {start_time.isoformat(timespec='seconds')}\n"
+            + "Command:\n"
+            + command
+            + "\n"
+            + "-" * 80
+            + "\n"
+        )
+        path = Path(log_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fp:
+            fp.write(header)
+    return log_path
+
+
+def log_line(message: str = "") -> None:
+    print(message)
+    log_path = os.environ.get(RUN_LOG_PATH_ENV)
+    if not log_path:
+        return
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fp:
+        fp.write(f"{message}\n")
+
+
+def finalize_run_logging(status: str) -> None:
+    log_path = os.environ.get(RUN_LOG_PATH_ENV)
+    if not log_path:
+        return
+
+    ended_at = datetime.now()
+    start_time_raw = os.environ.get(RUN_START_TIME_ENV)
+    duration_line = ""
+    if start_time_raw:
+        try:
+            started_at = datetime.fromisoformat(start_time_raw)
+            duration = ended_at - started_at
+            duration_line = f"Duration: {str(duration).split('.', maxsplit=1)[0]}\n"
+        except ValueError:
+            duration_line = ""
+
+    footer = (
+        "-" * 80
+        + "\n"
+        + f"Finished: {ended_at.isoformat(timespec='seconds')}\n"
+        + duration_line
+        + f"Status: {status}\n"
+    )
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fp:
+        fp.write(footer)
 
 
 def clone_state_dict(
@@ -1076,7 +1178,7 @@ def normalize_shared_context(shared_context: dict[str, object]) -> dict[str, obj
 def print_privacy_banner(privacy_settings: dict[str, float | str | bool | None]) -> None:
     if not privacy_settings["enabled"]:
         return
-    print(
+    log_line(
         "DP enabled | "
         f"clip={float(privacy_settings['clip_norm']):.4f} | "
         f"clip_decay={float(privacy_settings.get('clip_decay') or 1.0):.6f} | "
@@ -1158,7 +1260,7 @@ def run_single_experiment(
     )
     if start_round > 0:
         banner += f" | resume_from_round={start_round + 1}"
-    print(banner)
+    log_line(banner)
 
     local_trainer = get_local_trainer(algorithm)
     for round_idx in range(start_round, config.rounds):
@@ -1228,7 +1330,7 @@ def run_single_experiment(
             if privacy_settings["enabled"]:
                 history["clip_norm"].append(float(round_clip_norm))
                 history["epsilon"].append(epsilon_trace[current_round])
-            print(
+            log_line(
                 f"{algorithm.upper()} round={current_round:03d} | lr={lr:.5f} | "
                 f"local_loss={np.mean(local_losses):.4f} | test_loss={test_loss:.4f} | "
                 f"test_acc={accuracy * 100:.2f}%"
@@ -1272,7 +1374,7 @@ def build_json_snapshot(
 
 
 def summarize_histories(histories: dict[str, ExperimentHistory], algorithms: list[str]) -> None:
-    print("\nSummary")
+    log_line("\nSummary")
     for algorithm in algorithms:
         history = histories[algorithm]
         accuracy_history = history["accuracy"]
@@ -1284,7 +1386,7 @@ def summarize_histories(histories: dict[str, ExperimentHistory], algorithms: lis
         assert isinstance(epsilon_history, list)
         if epsilon_history:
             summary += f" | final_eps={epsilon_history[-1]:.4f}"
-        print(summary)
+        log_line(summary)
 
 
 def order_histories(
@@ -1298,7 +1400,14 @@ def build_result_payload(
     histories: dict[str, ExperimentHistory],
     fairness_metadata: dict[str, object],
 ) -> dict[str, object]:
-    payload: dict[str, object] = {"_meta": dict(fairness_metadata)}
+    meta = dict(fairness_metadata)
+    command = os.environ.get(RUN_COMMAND_ENV)
+    log_path = os.environ.get(RUN_LOG_PATH_ENV)
+    if command:
+        meta["command"] = command
+    if log_path:
+        meta["log_path"] = log_path
+    payload: dict[str, object] = {"_meta": meta}
     for algorithm, history in histories.items():
         payload[algorithm] = copy_history(history)
     return payload
@@ -1574,7 +1683,7 @@ def compare_histories_parallel(
 
     if config.save_json:
         save_histories(build_result_payload(ordered_histories, fairness_metadata), config.save_json)
-        print(f"Saved results to {config.save_json}")
+        log_line(f"Saved results to {config.save_json}")
 
     return ordered_histories
 
@@ -1597,7 +1706,7 @@ def compare_histories(
     if checkpoint is None and disable_reason is None:
         return compare_histories_parallel(config, resolved_algorithms, progress_hook=progress_hook)
     if config.compare_parallel and disable_reason is not None:
-        print(f"Compare-parallel disabled: {disable_reason}. Falling back to sequential compare.")
+        log_line(f"Compare-parallel disabled: {disable_reason}. Falling back to sequential compare.")
 
     set_random_seed(config.seed)
     runtime = build_runtime_config(config)
@@ -1731,7 +1840,7 @@ def compare_histories(
 
     if config.save_json:
         save_histories(build_result_payload(ordered_histories, fairness_metadata), config.save_json)
-        print(f"Saved results to {config.save_json}")
+        log_line(f"Saved results to {config.save_json}")
 
     return ordered_histories
 

@@ -125,8 +125,12 @@ python main_FedNSAM.py \
 - `seed`
 - `fairness_mode`
 - `context_hash`
+- `command`
+- `log_path`
 
 你可以直接对比不同实验文件里的 `_meta.context_hash`，快速判断它们是不是建立在同一份公平上下文上。
+
+如果你传了 `--save-json results/xxx.json`，程序还会自动把终端命令和训练输出一起保存到同目录下的 `results/xxx.log`。命令会按多行续行格式写入，方便直接复制修改。
 
 ## Client-level DP
 
