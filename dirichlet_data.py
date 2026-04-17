@@ -114,6 +114,38 @@ def build_dpfedsam_dirichlet_partitions(
     return client_indices, class_counts
 
 
+def build_dpfedsam_independent_dirichlet_partitions(
+    targets: np.ndarray,
+    num_clients: int,
+    alpha: float,
+    seed: int = 0,
+) -> list[list[int]]:
+    if alpha <= 0:
+        raise ValueError("alpha must be positive.")
+    if num_clients <= 0:
+        raise ValueError("num_clients must be positive.")
+
+    targets = np.asarray(targets)
+    if targets.ndim != 1:
+        raise ValueError("targets must be a 1D array.")
+
+    rng = np.random.RandomState(seed)
+    num_classes = int(targets.max()) + 1
+    label_distribution = rng.dirichlet([alpha] * num_clients, num_classes)
+    class_indices = [np.argwhere(targets == class_id).flatten() for class_id in range(num_classes)]
+
+    client_indices: list[list[int]] = [[] for _ in range(num_clients)]
+    for class_idcs, fractions in zip(class_indices, label_distribution):
+        shuffled = rng.permutation(class_idcs)
+        splits = np.split(shuffled, (np.cumsum(fractions)[:-1] * len(shuffled)).astype(int))
+        for client_id, indices in enumerate(splits):
+            client_indices[client_id].extend(indices.tolist())
+
+    for indices in client_indices:
+        rng.shuffle(indices)
+    return client_indices
+
+
 def record_net_data_stats(targets: np.ndarray, net_dataidx_map: dict[int, list[int]]) -> list[list[int]]:
     targets = np.asarray(targets)
     num_classes = int(targets.max()) + 1

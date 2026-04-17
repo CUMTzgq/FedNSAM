@@ -16,6 +16,7 @@
 - `sam.py`: SAM 优化器
 - `dirichlet_data.py`: Dirichlet 非 IID 客户端划分
 - `models/resnet.py`: CIFAR 用的最小 `ResNet-18`
+- `models/cnn.py`: EMNIST 用的最小 CNN
 
 ## 已移除的无关内容
 
@@ -81,6 +82,38 @@ python main_FedNSAM.py \
 - 同一组每轮客户端采样顺序
 
 这样 `FedAvg`、`FedSAM`、`FedNSAM` 的差异主要来自算法本身，而不是随机性。
+
+## EMNIST 支持
+
+现在 `--dataset` 也支持 `emnist`。
+
+- 默认采用 `EMNIST(split='byclass')`
+- 类别数固定为 `62`
+- 默认模型使用 `DP-FedSAM` 风格的 `cnn_emnist`
+- 训练和测试都使用 `DP-FedSAM` 风格的 EMNIST 变换：`RandomCrop(32, padding=4) + HorizontalFlip + VerticalFlip + RandomGrayscale + ToTensor`
+
+如果你想跑一条尽量贴近 `DP-FedSAM` README 的 EMNIST 命令，可以直接用：
+
+```bash
+python main_FedNSAM.py \
+  --algorithm fedsam \
+  --dataset emnist \
+  --dp \
+  --dp-clip 0.2 \
+  --sigma 0.95
+```
+
+这条命令在没有额外显式覆盖时，会自动解析成更贴近 `DP-FedSAM` 的 EMNIST 默认配置，例如：
+
+- `rounds=200`
+- `num_clients=500`
+- `client_fraction=0.1`
+- `local_epochs=30`
+- `batch_size=32`
+- `lr_decay=0.998`
+- `momentum=0.5`
+- `rho=0.5`
+- `alpha=0.6`
 
 如果你有两张 GPU，可以显式打开算法级并行 compare：
 

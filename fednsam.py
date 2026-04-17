@@ -24,9 +24,10 @@ from torchvision import datasets, transforms
 from dirichlet_data import (
     build_dirichlet_partitions,
     build_dpfedsam_client_test_partitions,
+    build_dpfedsam_independent_dirichlet_partitions,
     build_dpfedsam_dirichlet_partitions,
 )
-from models import resnet18_cifar
+from models import cnn_emnist, resnet18_cifar
 from privacy import (
     add_tensorwise_gaussian_noise_,
     clip_tensor_updates_,
@@ -95,7 +96,7 @@ class RuntimeConfig:
 
 
 CONFIG_DEFAULTS = FedNSAMConfig()
-DP_FEDSAM_DEFAULTS: dict[str, object] = {
+DP_FEDSAM_CIFAR_DEFAULTS: dict[str, object] = {
     "rounds": 300,
     "num_clients": 500,
     "client_fraction": 0.1,
@@ -107,6 +108,24 @@ DP_FEDSAM_DEFAULTS: dict[str, object] = {
     "lr_decay": 0.998,
     "alpha": 0.6,
 }
+DP_FEDSAM_EMNIST_DEFAULTS: dict[str, object] = {
+    "rounds": 200,
+    "num_clients": 500,
+    "client_fraction": 0.1,
+    "local_epochs": 30,
+    "batch_size": 32,
+    "rho": 0.5,
+    "momentum": 0.5,
+    "weight_decay": 5e-4,
+    "lr_decay": 0.998,
+    "alpha": 0.6,
+}
+
+
+def dpfedsam_defaults_for_dataset(dataset: str) -> dict[str, object]:
+    if dataset == "emnist":
+        return DP_FEDSAM_EMNIST_DEFAULTS
+    return DP_FEDSAM_CIFAR_DEFAULTS
 
 
 def field_was_explicitly_set(config: FedNSAMConfig, field_name: str) -> bool:
@@ -120,7 +139,7 @@ def resolve_effective_config(config: FedNSAMConfig) -> FedNSAMConfig:
         return copy.deepcopy(config)
 
     resolved = copy.deepcopy(config)
-    for field_name, value in DP_FEDSAM_DEFAULTS.items():
+    for field_name, value in dpfedsam_defaults_for_dataset(config.dataset).items():
         if not field_was_explicitly_set(config, field_name):
             setattr(resolved, field_name, value)
     if not field_was_explicitly_set(config, "grad_clip"):
@@ -453,6 +472,39 @@ def build_cifar_datasets(config: FedNSAMConfig):
     return train_dataset, test_dataset, num_classes
 
 
+def build_emnist_datasets(config: FedNSAMConfig):
+    transform = transforms.Compose(
+        [
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),
+            transforms.RandomGrayscale(),
+            transforms.ToTensor(),
+        ]
+    )
+    train_dataset = datasets.EMNIST(
+        config.data_dir,
+        split="byclass",
+        train=True,
+        download=True,
+        transform=transform,
+    )
+    test_dataset = datasets.EMNIST(
+        config.data_dir,
+        split="byclass",
+        train=False,
+        download=True,
+        transform=transform,
+    )
+    return train_dataset, test_dataset, 62
+
+
+def build_datasets(config: FedNSAMConfig):
+    if config.dataset == "emnist":
+        return build_emnist_datasets(config)
+    return build_cifar_datasets(config)
+
+
 def build_client_selection_schedule(config: FedNSAMConfig) -> list[list[int]]:
     clients_per_round = selected_clients_per_round(config)
     schedule: list[list[int]] = []
@@ -581,8 +633,14 @@ def build_test_loader(test_dataset, config: FedNSAMConfig, device: torch.device)
     )
 
 
-def build_model(num_classes: int, runtime: RuntimeConfig) -> nn.Module:
-    model = resnet18_cifar(num_classes=num_classes).to(runtime.device)
+def create_model_architecture(config: FedNSAMConfig, num_classes: int) -> nn.Module:
+    if config.dataset == "emnist":
+        return cnn_emnist(num_classes=num_classes)
+    return resnet18_cifar(num_classes=num_classes)
+
+
+def build_model(config: FedNSAMConfig, num_classes: int, runtime: RuntimeConfig) -> nn.Module:
+    model = create_model_architecture(config, num_classes).to(runtime.device)
     if runtime.channels_last:
         model = model.to(memory_format=torch.channels_last)
     return model
@@ -1017,6 +1075,7 @@ def compute_context_hash(
 
 def build_fairness_metadata(shared_context: dict[str, object]) -> dict[str, object]:
     return {
+        "dataset": str(shared_context["dataset"]),
         "seed": int(shared_context["seed"]),
         "fairness_mode": str(shared_context["fairness_mode"]),
         "context_hash": str(shared_context["context_hash"]),
@@ -1103,17 +1162,31 @@ def build_shared_context(
 ) -> dict[str, object]:
     targets = np.asarray(train_dataset.targets)
     if config.dp:
-        partitions, train_class_counts = build_dpfedsam_dirichlet_partitions(
-            targets=targets,
-            num_clients=config.num_clients,
-            alpha=config.alpha,
-            seed=config.seed,
-        )
-        test_partitions = build_dpfedsam_client_test_partitions(
-            test_targets=np.asarray(test_dataset.targets),
-            train_class_counts=train_class_counts,
-            seed=config.seed,
-        )
+        if config.dataset == "emnist":
+            partitions = build_dpfedsam_independent_dirichlet_partitions(
+                targets=targets,
+                num_clients=config.num_clients,
+                alpha=config.alpha,
+                seed=config.seed,
+            )
+            test_partitions = build_dpfedsam_independent_dirichlet_partitions(
+                targets=np.asarray(test_dataset.targets),
+                num_clients=config.num_clients,
+                alpha=config.alpha,
+                seed=config.seed + 1,
+            )
+        else:
+            partitions, train_class_counts = build_dpfedsam_dirichlet_partitions(
+                targets=targets,
+                num_clients=config.num_clients,
+                alpha=config.alpha,
+                seed=config.seed,
+            )
+            test_partitions = build_dpfedsam_client_test_partitions(
+                test_targets=np.asarray(test_dataset.targets),
+                train_class_counts=train_class_counts,
+                seed=config.seed,
+            )
         evaluation_mode = "client_average"
     else:
         client_sizes = build_equal_client_sizes(len(train_dataset), config.num_clients)
@@ -1132,9 +1205,10 @@ def build_shared_context(
     epsilon_trace = build_epsilon_trace(privacy_settings, eval_rounds)
 
     set_random_seed(config.seed)
-    initial_state = clone_state_dict(resnet18_cifar(num_classes=num_classes).state_dict())
+    initial_state = clone_state_dict(create_model_architecture(config, num_classes).state_dict())
     context_hash = compute_context_hash(partitions, selection_schedule, initial_state)
     return {
+        "dataset": config.dataset,
         "seed": config.seed,
         "fairness_mode": "seeded_shared_context",
         "context_hash": context_hash,
@@ -1152,6 +1226,7 @@ def build_shared_context(
 
 def normalize_shared_context(shared_context: dict[str, object]) -> dict[str, object]:
     normalized = dict(shared_context)
+    normalized["dataset"] = str(shared_context.get("dataset", "cifar100"))
     normalized["seed"] = int(shared_context.get("seed", 42))
     normalized["fairness_mode"] = str(shared_context.get("fairness_mode", "seeded_shared_context"))
     normalized["partitions"] = [list(indices) for indices in shared_context["partitions"]]
@@ -1218,7 +1293,7 @@ def run_single_experiment(
     algorithm = normalize_algorithm_name(algorithm)
     set_random_seed(config.seed)
 
-    work_model = build_model(num_classes, runtime)
+    work_model = build_model(config, num_classes, runtime)
     global_state = (
         clone_state_dict(initial_global_state, device=runtime.device)
         if initial_global_state is not None
@@ -1465,7 +1540,7 @@ def _parallel_compare_worker(
         runtime = build_runtime_config(worker_config)
         normalized_context = normalize_shared_context(shared_context)
         if dataset_payload is None:
-            train_dataset, test_dataset, _ = build_cifar_datasets(worker_config)
+            train_dataset, test_dataset, _ = build_datasets(worker_config)
         else:
             train_dataset, test_dataset, _ = dataset_payload
         client_loaders = build_client_loaders(
@@ -1556,7 +1631,7 @@ def compare_histories_parallel(
     *,
     progress_hook: ProgressHook | None = None,
 ) -> dict[str, ExperimentHistory]:
-    train_dataset, test_dataset, num_classes = build_cifar_datasets(config)
+    train_dataset, test_dataset, num_classes = build_datasets(config)
     shared_context = build_shared_context(config, train_dataset, test_dataset, num_classes)
     fairness_metadata = build_fairness_metadata(shared_context)
     privacy_settings = dict(shared_context["privacy_settings"])
@@ -1710,7 +1785,7 @@ def compare_histories(
 
     set_random_seed(config.seed)
     runtime = build_runtime_config(config)
-    train_dataset, test_dataset, num_classes = build_cifar_datasets(config)
+    train_dataset, test_dataset, num_classes = build_datasets(config)
 
     if checkpoint is None:
         shared_context = build_shared_context(config, train_dataset, test_dataset, num_classes)

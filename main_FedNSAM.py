@@ -21,7 +21,7 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         nargs="+",
         help="Compare multiple algorithms fairly, e.g. --compare fedavg fedsam fednsam",
     )
-    parser.add_argument("--dataset", choices=["cifar10", "cifar100"], default="cifar100")
+    parser.add_argument("--dataset", choices=["cifar10", "cifar100", "emnist"], default="cifar100")
     parser.add_argument("--data-dir", default="./data")
     parser.add_argument("--rounds", type=int, default=300)
     parser.add_argument("--num-clients", type=int, default=100)
