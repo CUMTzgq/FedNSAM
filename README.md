@@ -103,6 +103,27 @@ python main_FedNSAM.py \
   --sigma 0.95
 ```
 
+如果你想让 `FedNSAM` 的服务器动量系数 `gamma` 在第 `75` 轮开始直接归零，可以加：
+
+```bash
+python main_FedNSAM.py \
+  --algorithm fednsam \
+  --dataset cifar100 \
+  --rounds 300 \
+  --num-clients 100 \
+  --client-fraction 0.1 \
+  --local-epochs 5 \
+  --local-steps 50 \
+  --batch-size 50 \
+  --lr 0.1 \
+  --rho 0.05 \
+  --gamma 0.85 \
+  --gamma-zero-round 75 \
+  --alpha 0.1
+```
+
+这时前 `74` 轮保持原始 `gamma`，从第 `75` 轮起 `gamma = 0`。
+
 这条命令在没有额外显式覆盖时，会自动解析成更贴近 `DP-FedSAM` 的 EMNIST 默认配置，例如：
 
 - `rounds=200`

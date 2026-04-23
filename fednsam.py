@@ -63,6 +63,7 @@ class FedNSAMConfig:
     weight_decay: float = 1e-3
     rho: float = 0.05
     gamma: float = 0.85
+    gamma_zero_round: int | None = None
     alpha: float = 0.1
     grad_clip: float | None = 10.0
     dp: bool = False
@@ -1000,6 +1001,15 @@ def round_learning_rate(round_idx: int, config: FedNSAMConfig) -> float:
     return cosine_lr(round_idx, config)
 
 
+def round_gamma(round_idx: int, config: FedNSAMConfig) -> float:
+    if config.gamma_zero_round is None:
+        return config.gamma
+    current_round = round_idx + 1
+    if current_round >= config.gamma_zero_round:
+        return 0.0
+    return config.gamma
+
+
 def copy_history(history: ExperimentHistory) -> ExperimentHistory:
     return copy.deepcopy(history)
 
@@ -1340,13 +1350,14 @@ def run_single_experiment(
     local_trainer = get_local_trainer(algorithm)
     for round_idx in range(start_round, config.rounds):
         lr = round_learning_rate(round_idx, config)
+        gamma = round_gamma(round_idx, config)
         selected_clients = selection_schedule[round_idx]
         set_round_loader_seed(client_loaders, config.seed, round_idx, selected_clients)
         avg_delta = zero_update_like(global_state)
         local_losses: list[float] = []
         round_clip_norm = resolve_round_clip_norm(round_idx, privacy_settings) if privacy_settings["enabled"] else None
         reference_state = (
-            apply_update(global_state, global_momentum, alpha=config.gamma)
+            apply_update(global_state, global_momentum, alpha=gamma)
             if algorithm == "fednsam"
             else global_state
         )
@@ -1382,7 +1393,7 @@ def run_single_experiment(
             local_losses.append(local_loss)
 
         if algorithm == "fednsam":
-            update_global_momentum_(global_momentum, avg_delta, config.gamma)
+            update_global_momentum_(global_momentum, avg_delta, gamma)
             add_update_(global_state, global_momentum)
         else:
             add_update_(global_state, avg_delta)

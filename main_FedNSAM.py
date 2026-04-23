@@ -42,6 +42,12 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
     parser.add_argument("--weight-decay", type=float, default=1e-3)
     parser.add_argument("--rho", type=float, default=0.05)
     parser.add_argument("--gamma", type=float, default=0.85)
+    parser.add_argument(
+        "--gamma-zero-round",
+        type=int,
+        default=None,
+        help="Set gamma to 0 starting from this round (inclusive).",
+    )
     parser.add_argument("--alpha", type=float, default=0.1, help="Dirichlet non-IID coefficient.")
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--dp", action="store_true", help="Enable client-level differential privacy.")
@@ -156,6 +162,8 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
 
     if args.dp_clip_norm is not None and args.dp_clip_norm <= 0:
         parser.error("--dp-clip must be positive.")
+    if args.gamma_zero_round is not None and args.gamma_zero_round <= 0:
+        parser.error("--gamma-zero-round must be positive.")
     if args.dp_clip_decay <= 0:
         parser.error("--dp-clip-decay must be positive.")
     if args.dp_clip_min is not None and args.dp_clip_min <= 0:
@@ -187,6 +195,7 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         weight_decay=args.weight_decay,
         rho=args.rho,
         gamma=args.gamma,
+        gamma_zero_round=args.gamma_zero_round,
         alpha=args.alpha,
         grad_clip=args.grad_clip,
         dp=args.dp,
