@@ -1451,8 +1451,11 @@ def run_single_experiment(
                 avg_delta_norm = update_l2_norm(avg_delta)
                 momentum_norm = update_l2_norm(momentum_before_update)
                 momentum_cosine = update_cosine_similarity(avg_delta, momentum_before_update)
-                gated_gamma = config.gamma * max(0.0, momentum_cosine)
-                gamma_next = max(config.gamma_min, gated_gamma)
+                if momentum_norm == 0.0:
+                    gamma_next = config.gamma
+                else:
+                    gated_gamma = config.gamma * max(0.0, momentum_cosine)
+                    gamma_next = max(config.gamma_min, gated_gamma)
             else:
                 next_round_idx = min(round_idx + 1, config.rounds - 1)
                 gamma_next = round_gamma(next_round_idx, config)

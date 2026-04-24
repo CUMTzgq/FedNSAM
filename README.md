@@ -242,6 +242,8 @@ cos_t = <avg_delta, global_momentum> / (||avg_delta|| * ||global_momentum|| + 1e
 gamma_next = max(gamma_min, gamma * max(0, cos_t))
 ```
 
+如果历史 `global_momentum` 的范数为 `0`，说明还没有可用的一致性信号，此时 `gamma_next` 会保持为基础值 `gamma`，避免第一轮后直接把 `gamma` 关掉。
+
 当前轮仍使用当前生效的 `gamma_t`；`gamma_next` 从下一轮开始生效。默认 `gamma_strategy=fixed`，所以不传新参数时行为不变。`cosine_gate` 模式下会忽略已有的 `gamma_zero_round` / restart 逻辑，建议不要和这两个实验开关混用。
 
 可直接运行：
