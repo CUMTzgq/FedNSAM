@@ -64,6 +64,7 @@ class FedNSAMConfig:
     rho: float = 0.05
     gamma: float = 0.85
     gamma_zero_round: int | None = None
+    gamma_zero_lr_multiplier: float = 1.0
     alpha: float = 0.1
     grad_clip: float | None = 10.0
     dp: bool = False
@@ -587,28 +588,8 @@ def set_round_loader_seed(
             generator.manual_seed(round_seed_base + client_id)
 
 
-def algorithm_seed_offset(algorithm: str) -> int:
-    offset = 0
-    for index, byte in enumerate(algorithm.encode("utf-8"), start=1):
-        offset = (offset * 257 + index * byte) % (2**63 - 1)
-    return offset
-
-
-def build_round_noise_generator(
-    seed: int,
-    algorithm: str,
-    round_idx: int,
-    device: torch.device,
-) -> torch.Generator:
-    generator = torch.Generator(device=device.type)
-    round_seed = seed + 1_000_000_007 + algorithm_seed_offset(algorithm) + (round_idx + 1) * 1_000_003
-    generator.manual_seed(round_seed)
-    return generator
-
-
 def build_client_noise_generator(
     seed: int,
-    algorithm: str,
     round_idx: int,
     client_id: int,
     device: torch.device,
@@ -617,7 +598,6 @@ def build_client_noise_generator(
     client_seed = (
         seed
         + 2_000_000_033
-        + algorithm_seed_offset(algorithm)
         + (round_idx + 1) * 1_000_003
         + (client_id + 1) * 9_973
     )
@@ -992,13 +972,27 @@ def resolve_round_clip_norm(
 def round_learning_rate(round_idx: int, config: FedNSAMConfig) -> float:
     if config.lr_schedule == "cosine":
         return cosine_lr(round_idx, config)
-    if config.lr_schedule == "exp":
+    elif config.lr_schedule == "exp":
         return config.lr * (config.lr_decay**round_idx)
-    if config.lr_schedule != "auto":
+    elif config.lr_schedule != "auto":
         raise ValueError(f"Unsupported lr schedule: {config.lr_schedule}")
-    if config.dp:
+    elif config.dp:
         return config.lr * (config.lr_decay**round_idx)
     return cosine_lr(round_idx, config)
+
+
+def apply_gamma_zero_lr_restart(lr: float, round_idx: int, config: FedNSAMConfig) -> float:
+    if config.gamma_zero_round is None:
+        return lr
+
+    current_round = round_idx + 1
+    if current_round < config.gamma_zero_round:
+        return lr
+
+    restart_round_idx = config.gamma_zero_round - 1
+    restart_lr = round_learning_rate(restart_round_idx, config) * config.gamma_zero_lr_multiplier
+    decay_steps = current_round - config.gamma_zero_round
+    return restart_lr * (config.lr_decay**decay_steps)
 
 
 def round_gamma(round_idx: int, config: FedNSAMConfig) -> float:
@@ -1351,6 +1345,8 @@ def run_single_experiment(
     for round_idx in range(start_round, config.rounds):
         lr = round_learning_rate(round_idx, config)
         gamma = round_gamma(round_idx, config)
+        if algorithm == "fednsam":
+            lr = apply_gamma_zero_lr_restart(lr, round_idx, config)
         selected_clients = selection_schedule[round_idx]
         set_round_loader_seed(client_loaders, config.seed, round_idx, selected_clients)
         avg_delta = zero_update_like(global_state)
@@ -1374,7 +1370,6 @@ def run_single_experiment(
                 clip_tensor_updates_(update, float(round_clip_norm))
                 noise_generator = build_client_noise_generator(
                     config.seed,
-                    algorithm,
                     round_idx,
                     client_id,
                     runtime.device,

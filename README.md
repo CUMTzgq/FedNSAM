@@ -119,10 +119,13 @@ python main_FedNSAM.py \
   --rho 0.05 \
   --gamma 0.85 \
   --gamma-zero-round 75 \
+  --restart-factor 1.5 \
+  --lr-decay 0.998 \
   --alpha 0.1
 ```
 
 这时前 `74` 轮保持原始 `gamma`，从第 `75` 轮起 `gamma = 0`。
+第 `75` 轮学习率会重启为 `original_lr(75) * 1.5`，第 `76` 轮起不再使用 `original_lr(t) * 1.5`，而是以重启学习率为起点继续乘 `lr_decay` 做指数衰减。
 
 这条命令在没有额外显式覆盖时，会自动解析成更贴近 `DP-FedSAM` 的 EMNIST 默认配置，例如：
 

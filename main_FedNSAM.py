@@ -48,6 +48,14 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         default=None,
         help="Set gamma to 0 starting from this round (inclusive).",
     )
+    parser.add_argument(
+        "--gamma-zero-lr-multiplier",
+        "--restart-factor",
+        dest="gamma_zero_lr_multiplier",
+        type=float,
+        default=1.0,
+        help="Learning-rate restart factor applied on --gamma-zero-round.",
+    )
     parser.add_argument("--alpha", type=float, default=0.1, help="Dirichlet non-IID coefficient.")
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--dp", action="store_true", help="Enable client-level differential privacy.")
@@ -164,6 +172,10 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         parser.error("--dp-clip must be positive.")
     if args.gamma_zero_round is not None and args.gamma_zero_round <= 0:
         parser.error("--gamma-zero-round must be positive.")
+    if args.gamma_zero_lr_multiplier <= 0:
+        parser.error("--gamma-zero-lr-multiplier must be positive.")
+    if args.gamma_zero_round is None and args.gamma_zero_lr_multiplier != 1.0:
+        parser.error("--gamma-zero-lr-multiplier requires --gamma-zero-round.")
     if args.dp_clip_decay <= 0:
         parser.error("--dp-clip-decay must be positive.")
     if args.dp_clip_min is not None and args.dp_clip_min <= 0:
@@ -196,6 +208,7 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         rho=args.rho,
         gamma=args.gamma,
         gamma_zero_round=args.gamma_zero_round,
+        gamma_zero_lr_multiplier=args.gamma_zero_lr_multiplier,
         alpha=args.alpha,
         grad_clip=args.grad_clip,
         dp=args.dp,
