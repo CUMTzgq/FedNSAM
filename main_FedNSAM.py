@@ -43,6 +43,13 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
     parser.add_argument("--rho", type=float, default=0.05)
     parser.add_argument("--gamma", type=float, default=0.85)
     parser.add_argument(
+        "--gamma-strategy",
+        choices=["fixed", "cosine_gate"],
+        default="fixed",
+        help="Server momentum gamma strategy for FedNSAM.",
+    )
+    parser.add_argument("--gamma-min", type=float, default=0.0, help="Lower bound for cosine-gated gamma.")
+    parser.add_argument(
         "--gamma-zero-round",
         type=int,
         default=None,
@@ -170,6 +177,8 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
 
     if args.dp_clip_norm is not None and args.dp_clip_norm <= 0:
         parser.error("--dp-clip must be positive.")
+    if args.gamma_min < 0:
+        parser.error("--gamma-min must be non-negative.")
     if args.gamma_zero_round is not None and args.gamma_zero_round <= 0:
         parser.error("--gamma-zero-round must be positive.")
     if args.gamma_zero_lr_multiplier <= 0:
@@ -207,6 +216,8 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         weight_decay=args.weight_decay,
         rho=args.rho,
         gamma=args.gamma,
+        gamma_strategy=args.gamma_strategy,
+        gamma_min=args.gamma_min,
         gamma_zero_round=args.gamma_zero_round,
         gamma_zero_lr_multiplier=args.gamma_zero_lr_multiplier,
         alpha=args.alpha,

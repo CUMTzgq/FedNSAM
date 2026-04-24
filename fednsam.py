@@ -63,6 +63,8 @@ class FedNSAMConfig:
     weight_decay: float = 1e-3
     rho: float = 0.05
     gamma: float = 0.85
+    gamma_strategy: str = "fixed"
+    gamma_min: float = 0.0
     gamma_zero_round: int | None = None
     gamma_zero_lr_multiplier: float = 1.0
     alpha: float = 0.1
@@ -362,6 +364,35 @@ def zero_update_like(state_dict: OrderedDict[str, torch.Tensor]) -> OrderedDict[
         for name, tensor in state_dict.items()
         if torch.is_floating_point(tensor)
     )
+
+
+@torch.no_grad()
+def update_dot(
+    a: OrderedDict[str, torch.Tensor],
+    b: OrderedDict[str, torch.Tensor],
+) -> float:
+    total = 0.0
+    for name, tensor in a.items():
+        other = b.get(name)
+        if other is None or not torch.is_floating_point(tensor) or not torch.is_floating_point(other):
+            continue
+        total += torch.sum(tensor * other).item()
+    return total
+
+
+def update_l2_norm(update: OrderedDict[str, torch.Tensor]) -> float:
+    return math.sqrt(max(update_dot(update, update), 0.0))
+
+
+def update_cosine_similarity(
+    a: OrderedDict[str, torch.Tensor],
+    b: OrderedDict[str, torch.Tensor],
+) -> float:
+    a_norm = update_l2_norm(a)
+    b_norm = update_l2_norm(b)
+    if a_norm == 0.0 or b_norm == 0.0:
+        return 0.0
+    return update_dot(a, b) / (a_norm * b_norm + 1e-12)
 
 
 @torch.no_grad()
@@ -1292,6 +1323,7 @@ def run_single_experiment(
     initial_global_state: OrderedDict[str, torch.Tensor] | None = None,
     initial_global_momentum: OrderedDict[str, torch.Tensor] | None = None,
     initial_history: ExperimentHistory | None = None,
+    initial_effective_gamma: float | None = None,
     round_callback: ProgressHook | None = None,
 ) -> ExperimentHistory:
     algorithm = normalize_algorithm_name(algorithm)
@@ -1308,11 +1340,19 @@ def run_single_experiment(
         if initial_global_momentum is not None
         else zero_update_like(global_state)
     )
+    effective_gamma = config.gamma if initial_effective_gamma is None else float(initial_effective_gamma)
     history: ExperimentHistory = copy_history(initial_history) if initial_history is not None else {
         "algorithm": algorithm,
         "round": [],
         "accuracy": [],
         "loss": [],
+        "gamma_strategy": config.gamma_strategy,
+        "gamma_min": config.gamma_min,
+        "effective_gamma": [],
+        "gamma_next": [],
+        "momentum_cosine": [],
+        "avg_delta_norm": [],
+        "momentum_norm": [],
         "epsilon": [],
         "dp_enabled": privacy_settings["enabled"],
         "dp_clip_norm": privacy_settings["clip_norm"],
@@ -1329,6 +1369,13 @@ def run_single_experiment(
         "evaluation_mode": evaluation_mode,
     }
     history.setdefault("clip_norm", [])
+    history.setdefault("gamma_strategy", config.gamma_strategy)
+    history.setdefault("gamma_min", config.gamma_min)
+    history.setdefault("effective_gamma", [])
+    history.setdefault("gamma_next", [])
+    history.setdefault("momentum_cosine", [])
+    history.setdefault("avg_delta_norm", [])
+    history.setdefault("momentum_norm", [])
     history.setdefault("dp_clip_schedule", privacy_settings.get("clip_schedule"))
     history.setdefault("dp_clip_decay", privacy_settings.get("clip_decay"))
     history.setdefault("dp_clip_min", privacy_settings.get("clip_min"))
@@ -1339,14 +1386,21 @@ def run_single_experiment(
     )
     if start_round > 0:
         banner += f" | resume_from_round={start_round + 1}"
+    if algorithm == "fednsam" and config.gamma_strategy == "cosine_gate":
+        banner += f" | gamma_strategy=cosine_gate | gamma_min={config.gamma_min:.4f}"
+        if config.gamma_zero_round is not None:
+            banner += " | gamma_zero ignored"
     log_line(banner)
 
     local_trainer = get_local_trainer(algorithm)
     for round_idx in range(start_round, config.rounds):
         lr = round_learning_rate(round_idx, config)
-        gamma = round_gamma(round_idx, config)
-        if algorithm == "fednsam":
+        if algorithm == "fednsam" and config.gamma_strategy == "fixed":
             lr = apply_gamma_zero_lr_restart(lr, round_idx, config)
+        if algorithm == "fednsam":
+            gamma = round_gamma(round_idx, config) if config.gamma_strategy == "fixed" else effective_gamma
+        else:
+            gamma = config.gamma
         selected_clients = selection_schedule[round_idx]
         set_round_loader_seed(client_loaders, config.seed, round_idx, selected_clients)
         avg_delta = zero_update_like(global_state)
@@ -1387,9 +1441,24 @@ def run_single_experiment(
             accumulate_update_(avg_delta, update, scale)
             local_losses.append(local_loss)
 
+        gamma_next: float | None = None
+        momentum_cosine: float | None = None
+        avg_delta_norm: float | None = None
+        momentum_norm: float | None = None
         if algorithm == "fednsam":
+            if config.gamma_strategy == "cosine_gate":
+                momentum_before_update = global_momentum
+                avg_delta_norm = update_l2_norm(avg_delta)
+                momentum_norm = update_l2_norm(momentum_before_update)
+                momentum_cosine = update_cosine_similarity(avg_delta, momentum_before_update)
+                gated_gamma = config.gamma * max(0.0, momentum_cosine)
+                gamma_next = max(config.gamma_min, gated_gamma)
+            else:
+                next_round_idx = min(round_idx + 1, config.rounds - 1)
+                gamma_next = round_gamma(next_round_idx, config)
             update_global_momentum_(global_momentum, avg_delta, gamma)
             add_update_(global_state, global_momentum)
+            effective_gamma = gamma_next
         else:
             add_update_(global_state, avg_delta)
 
@@ -1408,6 +1477,11 @@ def run_single_experiment(
             history["round"].append(current_round)
             history["accuracy"].append(accuracy)
             history["loss"].append(test_loss)
+            history["effective_gamma"].append(gamma if algorithm == "fednsam" else None)
+            history["gamma_next"].append(gamma_next)
+            history["momentum_cosine"].append(momentum_cosine)
+            history["avg_delta_norm"].append(avg_delta_norm)
+            history["momentum_norm"].append(momentum_norm)
             if privacy_settings["enabled"]:
                 history["clip_norm"].append(float(round_clip_norm))
                 history["epsilon"].append(epsilon_trace[current_round])
@@ -1428,6 +1502,13 @@ def run_single_experiment(
                 + f" | clients={format_client_selection(selected_clients)}"
             )
 
+        if algorithm == "fednsam" and config.gamma_strategy == "cosine_gate":
+            log_line(
+                f"[Round {current_round:03d}] gamma={gamma:.6f} | next_gamma={float(gamma_next):.6f} | "
+                f"cos={float(momentum_cosine):.6f} | ||delta||={float(avg_delta_norm):.6e} | "
+                f"||m||={float(momentum_norm):.6e}"
+            )
+
         if round_callback is not None:
             round_callback(
                 {
@@ -1436,6 +1517,7 @@ def run_single_experiment(
                     "history": history,
                     "global_state": global_state,
                     "global_momentum": global_momentum,
+                    "effective_gamma": effective_gamma,
                     "did_eval": did_eval,
                 }
             )
@@ -1849,11 +1931,13 @@ def compare_histories(
             resumed_history = copy_history(current_state["history"])
             resumed_global_state = clone_state_dict(current_state["global_state"])
             resumed_global_momentum = clone_state_dict(current_state["global_momentum"])
+            resumed_effective_gamma = current_state.get("effective_gamma")
         else:
             start_round = 0
             resumed_history = None
             resumed_global_state = None
             resumed_global_momentum = None
+            resumed_effective_gamma = None
 
         def persist_progress(event: dict[str, object]) -> None:
             current_history = copy_history(event["history"])
@@ -1863,6 +1947,7 @@ def compare_histories(
                 "history": current_history,
                 "global_state": clone_state_dict(event["global_state"], device=torch.device("cpu")),
                 "global_momentum": clone_state_dict(event["global_momentum"], device=torch.device("cpu")),
+                "effective_gamma": event.get("effective_gamma"),
             }
             save_latest_checkpoint(
                 config=config,
@@ -1898,6 +1983,7 @@ def compare_histories(
             initial_global_state=resumed_global_state,
             initial_global_momentum=resumed_global_momentum,
             initial_history=resumed_history,
+            initial_effective_gamma=resumed_effective_gamma,
             round_callback=persist_progress,
         )
 

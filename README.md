@@ -231,6 +231,44 @@ DP 模式下如果你没有显式传入关键训练超参，会自动切到 `DP-
 
 这条 schedule 只会改变每轮的裁剪强度和绝对噪声大小；当前隐私会计仍然只依赖 `sigma / q / steps / delta`，所以在固定这些量时，`epsilon` 不会因为 `dp-clip-decay` 而改变。
 
+## DP-aware Consistency-Gated FedNSAM
+
+在 DP 噪声较强或训练后期，朴素固定 `gamma` 的 DP-FedNSAM 可能被 DP-FedSAM 反超。一个常见原因是历史 server momentum 与当前聚合更新方向不再一致，但固定 `gamma` 仍然继续做同等强度的 Nesterov 外推。
+
+现在可以用 `--gamma-strategy cosine_gate` 启用 consistency-gated gamma。它会在每轮聚合出 `avg_delta` 后，计算当前聚合更新和本轮开始时 `global_momentum` 的 cosine similarity：
+
+```text
+cos_t = <avg_delta, global_momentum> / (||avg_delta|| * ||global_momentum|| + 1e-12)
+gamma_next = max(gamma_min, gamma * max(0, cos_t))
+```
+
+当前轮仍使用当前生效的 `gamma_t`；`gamma_next` 从下一轮开始生效。默认 `gamma_strategy=fixed`，所以不传新参数时行为不变。`cosine_gate` 模式下会忽略已有的 `gamma_zero_round` / restart 逻辑，建议不要和这两个实验开关混用。
+
+可直接运行：
+
+```bash
+python main_FedNSAM.py \
+  --algorithm fednsam \
+  --dataset cifar100 \
+  --rounds 300 \
+  --num-clients 100 \
+  --client-fraction 0.1 \
+  --local-epochs 5 \
+  --local-steps 50 \
+  --batch-size 50 \
+  --lr 0.1 \
+  --rho 0.05 \
+  --gamma 0.85 \
+  --gamma-strategy cosine_gate \
+  --gamma-min 0.0 \
+  --alpha 0.1 \
+  --dp \
+  --dp-clip 0.2 \
+  --sigma 0.95 \
+  --delta 2e-5 \
+  --save-json results/cifar100_fednsam_cosine_gate_dp.json
+```
+
 最接近 `DP-FedSAM` 原论文的 CIFAR-10 命令可以直接写成：
 
 ```bash
