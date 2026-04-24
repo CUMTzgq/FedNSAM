@@ -340,6 +340,16 @@ python plot_results.py results/cifar10_compare_dp.json --show
 ```
 
 默认会把图片保存到 `figures/`，输出文件名形如 `figures/cifar100_compare_accuracy.png`。
+如果传入多个 JSON，默认会把它们合并到同一张图：
+
+```bash
+python plot_results.py \
+  results/cifar100_compare.json \
+  results/cifar10_compare_dp.json \
+  --output-name cifar_compare_all.png
+```
+
+如果你仍然想像旧行为一样每个 JSON 单独输出一张图，可以加 `--separate`。
 
 ## 单卡提速
 
