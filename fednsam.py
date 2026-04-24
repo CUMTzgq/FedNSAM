@@ -782,7 +782,7 @@ def run_local_sam(
         momentum=config.momentum,
         weight_decay=config.weight_decay,
         rho=config.rho,
-        adaptive=config.dp,
+        adaptive=False,
     )
     scaler = torch.amp.GradScaler("cuda", enabled=True) if runtime.use_grad_scaler else None
     step_limit = effective_local_step_limit(config)
