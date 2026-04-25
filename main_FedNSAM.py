@@ -41,6 +41,12 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
     parser.add_argument("--momentum", type=float, default=0.0, help="Local SGD momentum.")
     parser.add_argument("--weight-decay", type=float, default=1e-3)
     parser.add_argument("--rho", type=float, default=0.05)
+    parser.add_argument(
+        "--rho-mode",
+        choices=["fixed", "dp_algorithm"],
+        default="fixed",
+        help="Optional DP SAM rho/adaptive preset by algorithm.",
+    )
     parser.add_argument("--gamma", type=float, default=0.85)
     parser.add_argument(
         "--gamma-strategy",
@@ -215,6 +221,7 @@ def parse_args() -> tuple[FedNSAMConfig, list[str] | None]:
         momentum=args.momentum,
         weight_decay=args.weight_decay,
         rho=args.rho,
+        rho_mode=args.rho_mode,
         gamma=args.gamma,
         gamma_strategy=args.gamma_strategy,
         gamma_min=args.gamma_min,

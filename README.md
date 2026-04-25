@@ -198,7 +198,8 @@ python main_FedNSAM.py \
 - 对每个张量分别立刻加高斯噪声
 - 再对这些“已裁剪且已加噪”的客户端更新按样本数加权聚合
 - 隐私会计复用了 `DP-FedSAM/eps_computer.py` 的 RDP 实现
-- 局部 SAM 固定使用普通 SAM 扰动，即 `adaptive=False`
+- 默认局部 SAM 使用命令行给定的 `--rho`，并固定普通 SAM 扰动，即 `adaptive=False`
+- 如果显式启用 `--rho-mode dp_algorithm`，则 DP 下 `fedsam` 使用 `rho=0.5, adaptive=True`，`fednsam` 使用 `rho=0.1, adaptive=False`
 
 DP 模式下如果你没有显式传入关键训练超参，会自动切到 `DP-FedSAM` 的论文默认值：
 

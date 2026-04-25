@@ -62,6 +62,7 @@ class FedNSAMConfig:
     momentum: float = 0.0
     weight_decay: float = 1e-3
     rho: float = 0.05
+    rho_mode: str = "fixed"
     gamma: float = 0.85
     gamma_strategy: str = "fixed"
     gamma_min: float = 0.0
@@ -751,6 +752,7 @@ def run_local_sgd(
     lr: float,
     config: FedNSAMConfig,
     runtime: RuntimeConfig,
+    algorithm: str,
 ) -> float:
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(
@@ -798,22 +800,33 @@ def run_local_sgd(
     return total_loss / max(total_steps, 1)
 
 
+def resolve_sam_hyperparameters(algorithm: str, config: FedNSAMConfig) -> tuple[float, bool]:
+    if config.dp and config.rho_mode == "dp_algorithm":
+        if algorithm == "fedsam":
+            return 0.5, config.dp
+        if algorithm == "fednsam":
+            return 0.1, False
+    return config.rho, False
+
+
 def run_local_sam(
     model: nn.Module,
     loader: DataLoader,
     lr: float,
     config: FedNSAMConfig,
     runtime: RuntimeConfig,
+    algorithm: str,
 ) -> float:
     criterion = nn.CrossEntropyLoss()
+    sam_rho, sam_adaptive = resolve_sam_hyperparameters(algorithm, config)
     optimizer = SAM(
         model.parameters(),
         torch.optim.SGD,
         lr=lr,
         momentum=config.momentum,
         weight_decay=config.weight_decay,
-        rho=config.rho,
-        adaptive=False,
+        rho=sam_rho,
+        adaptive=sam_adaptive,
     )
     scaler = torch.amp.GradScaler("cuda", enabled=True) if runtime.use_grad_scaler else None
     step_limit = effective_local_step_limit(config)
@@ -1390,6 +1403,9 @@ def run_single_experiment(
         banner += f" | gamma_strategy=cosine_gate | gamma_min={config.gamma_min:.4f}"
         if config.gamma_zero_round is not None:
             banner += " | gamma_zero ignored"
+    if algorithm in {"fedsam", "fednsam"} and config.dp and config.rho_mode == "dp_algorithm":
+        sam_rho, sam_adaptive = resolve_sam_hyperparameters(algorithm, config)
+        banner += f" | rho_mode=dp_algorithm | local_rho={sam_rho:.4f} | adaptive={sam_adaptive}"
     log_line(banner)
 
     local_trainer = get_local_trainer(algorithm)
@@ -1418,7 +1434,7 @@ def run_single_experiment(
 
         for client_id in selected_clients:
             copy_state_into_model(work_model, reference_state)
-            local_loss = local_trainer(work_model, client_loaders[client_id], lr, config, runtime)
+            local_loss = local_trainer(work_model, client_loaders[client_id], lr, config, runtime, algorithm)
             update = state_delta(reference_state, work_model.state_dict())
             if privacy_settings["enabled"]:
                 clip_tensor_updates_(update, float(round_clip_norm))

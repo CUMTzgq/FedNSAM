@@ -1,0 +1,51 @@
+
+================================================================================
+Started: 2026-04-25T15:01:14
+Command:
+python main_FedNSAM.py \
+  --algorithm fednsam \
+  --device cuda:0 \
+  --dataset emnist \
+  --rounds 200 \
+  --num-clients 100 \
+  --client-fraction 0.1 \
+  --local-epochs 1 \
+  --batch-size 64 \
+  --lr 0.1 \
+  --lr-decay 0.998 \
+  --rho 0.1 \
+  --gamma 0.85 \
+  --alpha 0.6 \
+  --eval-every 10 \
+  --save-json results/eminist_fensam.json
+--------------------------------------------------------------------------------
+FEDNSAM | dataset=emnist | clients=100 | selected=10 | device=cuda:0
+FEDNSAM round=001 | lr=0.10000 | local_loss=3.3202 | test_loss=3.8372 | test_acc=5.70% | clients=[83, 53, 70, 45, 44, 39, 22, 80] ... (10 clients)
+FEDNSAM round=010 | lr=0.09950 | local_loss=0.9135 | test_loss=1.7137 | test_acc=52.02% | clients=[71, 43, 11, 83, 78, 19, 80, 4] ... (10 clients)
+FEDNSAM round=020 | lr=0.09779 | local_loss=0.5783 | test_loss=1.0327 | test_acc=66.67% | clients=[83, 1, 55, 9, 31, 28, 96, 29] ... (10 clients)
+FEDNSAM round=030 | lr=0.09490 | local_loss=0.4487 | test_loss=0.9421 | test_acc=70.30% | clients=[41, 84, 98, 42, 75, 25, 60, 19] ... (10 clients)
+FEDNSAM round=040 | lr=0.09091 | local_loss=0.5525 | test_loss=0.8693 | test_acc=71.66% | clients=[73, 89, 41, 78, 51, 21, 30, 69] ... (10 clients)
+FEDNSAM round=050 | lr=0.08591 | local_loss=0.4014 | test_loss=0.8684 | test_acc=71.76% | clients=[75, 25, 3, 52, 78, 54, 59, 26] ... (10 clients)
+FEDNSAM round=060 | lr=0.08002 | local_loss=0.4862 | test_loss=0.7715 | test_acc=74.55% | clients=[16, 1, 43, 67, 89, 21, 97, 51] ... (10 clients)
+FEDNSAM round=070 | lr=0.07340 | local_loss=0.3993 | test_loss=0.8133 | test_acc=73.23% | clients=[15, 53, 44, 16, 90, 20, 89, 91] ... (10 clients)
+FEDNSAM round=080 | lr=0.06620 | local_loss=0.5045 | test_loss=0.7450 | test_acc=75.90% | clients=[82, 38, 23, 98, 18, 22, 20, 15] ... (10 clients)
+FEDNSAM round=090 | lr=0.05860 | local_loss=0.4397 | test_loss=0.7422 | test_acc=75.84% | clients=[58, 91, 28, 46, 13, 2, 34, 49] ... (10 clients)
+FEDNSAM round=100 | lr=0.05079 | local_loss=0.4445 | test_loss=0.7171 | test_acc=76.39% | clients=[46, 1, 51, 10, 96, 87, 15, 73] ... (10 clients)
+FEDNSAM round=110 | lr=0.04295 | local_loss=0.4532 | test_loss=0.7135 | test_acc=76.06% | clients=[18, 12, 88, 60, 84, 40, 53, 15] ... (10 clients)
+FEDNSAM round=120 | lr=0.03530 | local_loss=0.4016 | test_loss=0.7037 | test_acc=76.47% | clients=[91, 7, 93, 55, 62, 9, 25, 20] ... (10 clients)
+FEDNSAM round=130 | lr=0.02800 | local_loss=0.3681 | test_loss=0.7463 | test_acc=75.76% | clients=[72, 76, 52, 63, 4, 33, 59, 47] ... (10 clients)
+FEDNSAM round=140 | lr=0.02125 | local_loss=0.4374 | test_loss=0.6795 | test_acc=77.49% | clients=[67, 37, 22, 13, 40, 45, 60, 15] ... (10 clients)
+FEDNSAM round=150 | lr=0.01520 | local_loss=0.4604 | test_loss=0.6888 | test_acc=77.38% | clients=[46, 33, 7, 54, 12, 87, 67, 25] ... (10 clients)
+FEDNSAM round=160 | lr=0.01002 | local_loss=0.2940 | test_loss=0.7496 | test_acc=75.14% | clients=[91, 57, 19, 66, 30, 74, 86, 67] ... (10 clients)
+FEDNSAM round=170 | lr=0.00581 | local_loss=0.4280 | test_loss=0.6645 | test_acc=77.39% | clients=[88, 51, 28, 55, 96, 80, 62, 10] ... (10 clients)
+FEDNSAM round=180 | lr=0.00270 | local_loss=0.4009 | test_loss=0.6571 | test_acc=77.90% | clients=[68, 77, 61, 58, 67, 47, 50, 83] ... (10 clients)
+FEDNSAM round=190 | lr=0.00074 | local_loss=0.4040 | test_loss=0.6700 | test_acc=77.51% | clients=[77, 85, 82, 66, 91, 3, 83, 98] ... (10 clients)
+FEDNSAM round=200 | lr=0.00001 | local_loss=0.6534 | test_loss=0.6701 | test_acc=77.74% | clients=[7, 3, 67, 45, 5, 80, 47, 43] ... (10 clients)
+
+Summary
+FEDNSAM  | best_acc=77.90% | final_acc=77.74%
+Saved results to results/eminist_fensam.json
+--------------------------------------------------------------------------------
+Finished: 2026-04-25T15:56:58
+Duration: 0:55:44
+Status: completed
